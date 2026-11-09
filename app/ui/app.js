@@ -10,6 +10,7 @@ let clientStatus = null;
 let updating = false;
 let launcherUpdate = null;
 let launcherUpdating = false;
+let setupReady = false;
 
 function toast(text) {
   const t = $('toast');
@@ -239,7 +240,7 @@ async function refresh() {
 
 function updatePlayButton() {
   const play = $('play');
-  play.disabled = state.playing || !state.gameFound || updating || launcherUpdating;
+  play.disabled = state.playing || !state.gameFound || updating || launcherUpdating || !setupReady;
   play.classList.toggle('running', state.playing);
   play.textContent = state.playing ? t('inGame') : t('play');
   if (!state.gameFound && !state.playing) setStep(t('chooseGameDir'), 'err');
@@ -265,6 +266,8 @@ async function refreshChecks() {
     // on Linux the prefix certificate is installed automatically at launch: only the hosts entry needs the user
     const needsCert = state.platform !== 'linux' && !c.certificate;
     const blocking = !c.hosts || needsCert;
+    setupReady = !blocking;
+    updatePlayButton();
     $('setup-notice').hidden = !blocking;
     $('setup-detail').textContent = [!c.hosts && c.hostsDetail, needsCert && c.certificateDetail]
       .filter(Boolean).join(' · ');
