@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Forever AI Launcher</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- rotating key art behind everything -->
+  <div class="backdrop" aria-hidden="true">
+    <div class="bg scene-1"></div>
+    <div class="bg scene-2"></div>
+    <div class="bg scene-3"></div>
+    <div class="shade"></div>
+  </div>
+
+  <header class="topbar">
+    <div class="top-logo"><strong>FOREVER AI</strong><small>WoW Forever · Дримворлд</small></div>
+
+    <div class="status" id="status" data-state="unknown">
+      <span class="dot"></span><span id="status-text" data-i18n="checking">Checking the server…</span>
+    </div>
+
+    <div class="top-actions">
+      <div class="account" id="account" hidden>
+        <div class="avatar" id="avatar">?</div>
+        <div class="account-text">
+          <strong id="account-email"></strong>
+          <span class="online" data-i18n="connected">Logged in</span>
+        </div>
+        <button class="btn ghost small" id="logout" data-i18n="logout" title="Log out">Log out</button>
+      </div>
+      <button class="icon-btn" id="open-settings" data-i18n-title="settings" title="Settings" aria-label="Settings">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><use href="#gear"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- PC preparation needed (hosts / certificate) -->
+  <div class="banner" id="setup-notice" hidden>
+    <div>
+      <strong data-i18n="setupNeeded">PC setup needed</strong>
+      <p id="setup-detail"></p>
+    </div>
+    <button class="btn light" id="setup-fix" data-i18n="setupFix">Set up</button>
+  </div>
+
+  <main class="stage">
+    <!-- login -->
+    <section class="view view-login" id="view-login" hidden>
+      <div class="card">
+        <h2 data-i18n="loginTitle">Log in</h2>
+        <p class="muted" data-i18n="loginHint">Your server account. The launcher remembers you for 30 days.</p>
+        <form id="login-form" class="form">
+          <label><span data-i18n="email">E-mail address</span><input id="email" type="email" required autocomplete="username"></label>
+          <label><span data-i18n="password">Password</span><input id="password" type="password" required autocomplete="current-password"></label>
+          <p class="error" id="login-error" hidden></p>
+          <button class="btn primary big" type="submit" id="login-btn" data-i18n="loginButton">Log in</button>
+        </form>
+        <p class="muted small" id="signup" hidden><span data-i18n="noAccount">No account?</span> <a href="#" id="signup-link" data-i18n="createAccount">Create one</a></p>
+      </div>
+    </section>
+
+    <!-- play -->
+    <section class="view view-play" id="view-play" hidden>
+      <div class="launch">
+        <span class="label" data-i18n="versionRealm">Game version &amp; realm</span>
+        <div class="field" id="game-field">WoW Forever</div>
+        <div class="field" id="realm-field">Realm Forever</div>
+        <div class="play-group">
+          <button class="btn play" id="play" disabled>Play</button>
+          <button class="btn play-gear" id="play-settings" data-i18n-title="gameSettings" title="Game settings" aria-label="Game settings">
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><use href="#gear"/></svg>
+          </button>
+        </div>
+        <p class="step" id="step"></p>
+        <p class="version"><span id="version"></span> · <a href="#" id="toggle-log" data-i18n="journal">Log</a></p>
+      </div>
+
+      <div class="news">
+        <div class="news-head">
+          <span class="label" data-i18n="news">News</span>
+          <a href="#" id="news-more" data-i18n="seeAll" hidden>See all</a>
+        </div>
+        <div class="news-list" id="news"></div>
+      </div>
+
+      <div class="log" id="log-box" hidden>
+        <div class="log-head"><strong data-i18n="journal">Log</strong><button class="icon-btn" id="close-log" data-i18n-title="close" aria-label="Close">✕</button></div>
+        <pre id="log"></pre>
+      </div>
+    </section>
+  </main>
+
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true"><symbol id="gear" viewBox="0 0 24 24"><path fill="currentColor" d="M19.14 12.94a7.07 7.07 0 0 0 .05-.94 7.07 7.07 0 0 0-.05-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7 7 0 0 0-1.63-.94l-.36-2.54A.5.5 0 0 0 13.9 2h-3.84a.5.5 0 0 0-.5.42l-.36 2.54a7.3 7.3 0 0 0-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.66 8.48a.5.5 0 0 0 .12.64l2.03 1.58a7.07 7.07 0 0 0 0 1.88l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32c.13.22.39.3.6.22l2.39-.96c.5.39 1.05.7 1.63.94l.36 2.54c.05.24.26.42.5.42h3.84c.25 0 .45-.18.5-.42l.36-2.54a7.3 7.3 0 0 0 1.63-.94l2.39.96c.22.08.47 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64zM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7z"/></symbol></svg>
+
+  <!-- settings drawer -->
+  <div class="scrim" id="scrim" hidden></div>
+  <section class="drawer" id="settings" data-i18n-title="settings" aria-label="Settings" hidden>
+    <header class="drawer-head">
+      <h2 data-i18n="settings">Settings</h2>
+      <button class="icon-btn" id="close-settings" data-i18n-title="close" aria-label="Close">✕</button>
+    </header>
+    <div class="drawer-body">
+      <fieldset>
+        <legend data-i18n="game">Game</legend>
+        <label><span><span data-i18n="gameDir">Game folder</span> <span class="muted small" data-i18n="gameDirHint">· _forever_, содержит Wow.exe</span></span>
+          <span class="row"><input id="s-game-dir" type="text" spellcheck="false"><button class="btn small" id="pick-game" data-i18n="browse">Browse</button></span>
+        </label>
+        <p class="small" id="game-dir-state"></p>
+        <label><span data-i18n="gameLocale">Game language</span><select id="s-locale"></select></label>
+        <label><span data-i18n="language">Launcher language</span><select id="s-language"></select></label>
+      </fieldset>
+
+      <fieldset id="linux-settings" hidden>
+        <legend>Linux</legend>
+        <label>Proton / Wine<select id="s-runner"></select></label>
+        <label><span data-i18n="winePrefix">Wine prefix</span>
+          <span class="row"><input id="s-prefix" type="text" spellcheck="false"><button class="btn small" id="pick-prefix" data-i18n="browse">Browse</button></span>
+        </label>
+        <label class="switch"><input id="s-gamescope" type="checkbox"><span>Gamescope</span></label>
+        <label><span data-i18n="gamescopeOptions">Gamescope options</span><input id="s-gamescope-args" type="text" placeholder="-W 2560 -H 1440 -f" spellcheck="false"></label>
+        <label><span data-i18n="gamescopeKeyboard">Keyboard in gamescope</span><input id="s-keyboard" type="text" placeholder="fr+azerty" spellcheck="false"></label>
+      </fieldset>
+
+      <fieldset>
+        <legend data-i18n="checksTitle">Checks</legend>
+        <div class="check" id="check-hosts"><span class="ico"></span><div><strong data-i18n="serverAddressCheck">Server address</strong><p class="small"></p></div></div>
+        <div class="check" id="check-cert"><span class="ico"></span><div><strong data-i18n="serverCertCheck">Server certificate</strong><p class="small"></p></div></div>
+        <button class="btn small" id="repair" data-i18n="repair">Fix</button>
+      </fieldset>
+
+      <details class="advanced">
+        <summary data-i18n="advanced">Server (advanced)</summary>
+        <label><span data-i18n="serverAddress">Server address</span><input id="s-address" type="text" spellcheck="false"></label>
+        <label><span data-i18n="website">Website</span><input id="s-website" type="url" placeholder="https://…" spellcheck="false"></label>
+        <label><span data-i18n="portal">Portal</span><input id="s-portal" type="text" spellcheck="false"></label>
+      </details>
+    </div>
+    <footer class="drawer-foot">
+      <button class="btn ghost" id="cancel-settings" data-i18n="cancel">Cancel</button>
+      <button class="btn primary" id="save-settings" data-i18n="save">Save</button>
+    </footer>
+  </section>
+
+  <div class="toast" id="toast" hidden></div>
+  <script src="i18n.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
