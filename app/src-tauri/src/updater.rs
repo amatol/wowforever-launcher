@@ -4,6 +4,7 @@ use crate::config::Settings;
 use futures_util::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -177,6 +178,25 @@ fn file_size(path: &Path) -> Option<u64> {
     std::fs::metadata(path).ok().map(|meta| meta.len())
 }
 
+fn file_matches(path: &Path, size: u64, expected_sha: &str) -> bool {
+    if file_size(path) != Some(size) {
+        return false;
+    }
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        match file.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => hasher.update(&buffer[..read]),
+            Err(_) => return false,
+        }
+    }
+    hex::encode(hasher.finalize()) == expected_sha
+}
+
 pub async fn client_status(settings: &Settings) -> Result<ClientStatus, String> {
     let manifest = fetch_client_manifest(settings).await?;
     let root = client_root(settings)?;
@@ -282,7 +302,7 @@ pub async fn addons_status(settings: &Settings) -> Result<AddonsStatus, String> 
         for file in &addon.files {
             total_files += 1;
             let path = root.join(safe_relative(&file.path)?);
-            if file_size(&path) != Some(file.size) {
+            if !file_matches(&path, file.size, &file.sha256) {
                 changed_files += 1;
                 changed_bytes = changed_bytes.saturating_add(file.size);
             }
@@ -306,7 +326,7 @@ pub async fn update_addons(app: &AppHandle, settings: &Settings) -> Result<(), S
     for addon in &manifest.addons {
         for file in &addon.files {
             let relative = safe_relative(&file.path)?;
-            if file_size(&root.join(&relative)) != Some(file.size) {
+            if !file_matches(&root.join(&relative), file.size, &file.sha256) {
                 entries.push(DownloadEntry {
                     path: file.path.clone(),
                     url: file.download_url.clone(),
