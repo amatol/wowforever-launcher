@@ -75,6 +75,7 @@
           </button>
         </div>
         <p class="step" id="step"></p>
+        <p class="step" id="client-notice" hidden></p>
         <p class="version"><span id="version"></span> · <a href="#" id="toggle-log" data-i18n="journal">Log</a></p>
       </div>
 
@@ -129,6 +130,21 @@
         <div class="check" id="check-hosts"><span class="ico"></span><div><strong data-i18n="serverAddressCheck">Server address</strong><p class="small"></p></div></div>
         <div class="check" id="check-cert"><span class="ico"></span><div><strong data-i18n="serverCertCheck">Server certificate</strong><p class="small"></p></div></div>
         <button class="btn small" id="repair" data-i18n="repair">Fix</button>
+      </fieldset>
+
+      <fieldset>
+        <legend data-i18n="updatesTitle">Updates</legend>
+        <p class="small" id="client-state"></p>
+        <p class="small" id="addons-state"></p>
+        <div class="progress" id="update-progress" hidden><div class="progress-bar" id="update-bar"></div></div>
+        <p class="small" id="update-detail"></p>
+        <div class="row">
+          <button class="btn small" id="check-client" data-i18n="checkClient">Check client</button>
+          <button class="btn primary small" id="update-client" data-i18n="updateClient">Update client</button>
+        </div>
+        <div class="row">
+          <button class="btn small" id="update-addons" data-i18n="updateAddons">Update addons</button>
+        </div>
       </fieldset>
 
       <details class="advanced">

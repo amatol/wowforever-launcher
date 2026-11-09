@@ -6,6 +6,8 @@ const $ = (id) => document.getElementById(id);
 let state = null;      // snapshot from get_state
 let draft = null;      // settings being edited in the drawer
 let toastTimer = 0;
+let clientStatus = null;
+let updating = false;
 
 function toast(text) {
   const t = $('toast');
@@ -26,6 +28,115 @@ function setStep(text, kind = '') {
   const s = $('step');
   s.textContent = text;
   s.className = 'step' + (kind ? ' ' + kind : '');
+}
+
+function formatBytes(bytes) {
+  const units = ['Б', 'КиБ', 'МиБ', 'ГиБ', 'ТиБ'];
+  let value = Number(bytes) || 0;
+  let index = 0;
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024;
+    index += 1;
+  }
+  return `${value.toFixed(index === 0 || value >= 10 ? 0 : 1)} ${units[index]}`;
+}
+
+async function refreshClientStatus() {
+  if (!state || !state.gameFound) {
+    $('client-state').textContent = t('chooseGameDir');
+    $('client-notice').hidden = true;
+    return;
+  }
+  try {
+    clientStatus = await invoke('client_status');
+    if (updating) return;
+    if (clientStatus.upToDate) {
+      $('client-state').textContent = t('clientUpToDate');
+      $('client-notice').hidden = true;
+    } else {
+      $('client-state').textContent = t('clientUpdateAvailable', {
+        files: clientStatus.changedFiles,
+        size: formatBytes(clientStatus.changedBytes),
+      });
+      $('client-notice').textContent = t('clientNotice');
+      $('client-notice').hidden = false;
+    }
+  } catch (e) {
+    $('client-state').textContent = t('updateError', { e });
+    $('client-notice').hidden = true;
+  }
+}
+
+async function refreshAddonsStatus() {
+  if (!state || !state.gameFound) {
+    $('addons-state').textContent = t('chooseGameDir');
+    return;
+  }
+  try {
+    const status = await invoke('addons_status');
+    $('addons-state').textContent = status.upToDate
+      ? t('addonsUpToDate')
+      : t('addonsUpdateAvailable', { files: status.changedFiles });
+  } catch (e) {
+    $('addons-state').textContent = t('updateError', { e });
+  }
+}
+
+function handleUpdateEvent(payload, prefix) {
+  const progressKey = prefix === 'client' ? 'clientProgress' : 'addonsProgress';
+  const startKey = prefix === 'client' ? 'clientStarting' : 'addonsStarting';
+  const doneKey = prefix === 'client' ? 'clientDone' : 'addonsDone';
+  if (payload.kind === 'start') {
+    $('update-progress').hidden = false;
+    $('update-bar').style.width = '0%';
+    $('update-detail').textContent = t(startKey);
+    return;
+  }
+  if (payload.kind === 'progress') {
+    const percent = Math.max(0, Math.min(100, Number(payload.percent) || 0));
+    $('update-progress').hidden = false;
+    $('update-bar').style.width = `${percent}%`;
+    const file = payload.file ? ` · ${String(payload.file).split('/').pop()}` : '';
+    $('update-detail').textContent =
+      t(progressKey, { current: payload.current, total: payload.total, percent: percent.toFixed(1) }) + file;
+    return;
+  }
+  if (payload.kind === 'done') {
+    $('update-bar').style.width = '100%';
+    $('update-detail').textContent = t(doneKey);
+    toast(t(doneKey));
+    updating = false;
+    updatePlayButton();
+    refreshClientStatus();
+    refreshAddonsStatus();
+    return;
+  }
+  if (payload.kind === 'error') {
+    $('update-detail').textContent = t('updateError', { e: payload.message });
+    toast(t('updateError', { e: payload.message }));
+    updating = false;
+    updatePlayButton();
+  }
+}
+
+async function runUpdate(prefix, command, startKey) {
+  if (updating) return;
+  updating = true;
+  updatePlayButton();
+  $('update-progress').hidden = false;
+  $('update-bar').style.width = '0%';
+  $('update-detail').textContent = t(startKey);
+  try {
+    await invoke(command);
+  } catch (e) {
+    $('update-detail').textContent = t('updateError', { e });
+    toast(t('updateError', { e }));
+  } finally {
+    updating = false;
+    updatePlayButton();
+    refreshClientStatus();
+    refreshAddonsStatus();
+  }
 }
 
 // ------------------------------------------------------------------------------------------------ state
@@ -53,11 +164,12 @@ async function refresh() {
     $('avatar').textContent = state.email[0].toUpperCase();
   }
   updatePlayButton();
+  refreshClientStatus();
 }
 
 function updatePlayButton() {
   const play = $('play');
-  play.disabled = state.playing || !state.gameFound;
+  play.disabled = state.playing || !state.gameFound || updating;
   play.classList.toggle('running', state.playing);
   play.textContent = state.playing ? t('inGame') : t('play');
   if (!state.gameFound && !state.playing) setStep(t('chooseGameDir'), 'err');
@@ -236,6 +348,8 @@ function gameDirState() {
 
 function openSettings() {
   fillSettings();
+  refreshClientStatus();
+  refreshAddonsStatus();
   $('settings').hidden = false;
   $('scrim').hidden = false;
   refreshChecks();
@@ -258,6 +372,7 @@ async function pick(input, title) {
 }
 
 $('open-settings').addEventListener('click', openSettings);
+$('client-notice').addEventListener('click', openSettings);
 $('play-settings').addEventListener('click', openSettings);
 $('close-settings').addEventListener('click', closeSettings);
 $('cancel-settings').addEventListener('click', closeSettings);
@@ -266,6 +381,15 @@ $('pick-game').addEventListener('click', () => pick($('s-game-dir'), t('pickGame
 $('pick-prefix').addEventListener('click', () => pick($('s-prefix'), t('pickPrefix')));
 $('s-game-dir').addEventListener('input', gameDirState);
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('settings').hidden) closeSettings(); });
+
+$('check-client').addEventListener('click', async () => {
+  await refreshClientStatus();
+  if (clientStatus && clientStatus.upToDate) toast(t('clientUpToDate'));
+});
+$('update-client').addEventListener('click', () => runUpdate('client', 'update_client', 'clientStarting'));
+$('update-addons').addEventListener('click', () => runUpdate('addons', 'update_addons', 'addonsStarting'));
+listen('client', ({ payload }) => handleUpdateEvent(payload, 'client'));
+listen('addons', ({ payload }) => handleUpdateEvent(payload, 'addons'));
 
 $('save-settings').addEventListener('click', async () => {
   draft.gameDir = $('s-game-dir').value.trim();

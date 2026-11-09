@@ -11,6 +11,7 @@ mod macos;
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 mod patcher;
 mod system;
+mod updater;
 
 use config::{Session, Settings};
 use i18n::{t, tf};
@@ -149,6 +150,36 @@ async fn news(state: State<'_, AppState>) -> Result<Vec<api::NewsItem>, String> 
         return Ok(Vec::new());
     }
     api::news(&website).await
+}
+
+#[tauri::command]
+async fn client_status(state: State<'_, AppState>) -> Result<updater::ClientStatus, String> {
+    let settings = state.settings.lock().unwrap().clone();
+    updater::client_status(&settings).await
+}
+
+#[tauri::command]
+async fn update_client(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    if state.playing.load(Ordering::SeqCst) {
+        return Err("Нельзя обновлять клиент во время игры".into());
+    }
+    let settings = state.settings.lock().unwrap().clone();
+    updater::update_client(&app, &settings).await
+}
+
+#[tauri::command]
+async fn addons_status(state: State<'_, AppState>) -> Result<updater::AddonsStatus, String> {
+    let settings = state.settings.lock().unwrap().clone();
+    updater::addons_status(&settings).await
+}
+
+#[tauri::command]
+async fn update_addons(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    if state.playing.load(Ordering::SeqCst) {
+        return Err("Нельзя обновлять аддоны во время игры".into());
+    }
+    let settings = state.settings.lock().unwrap().clone();
+    updater::update_addons(&app, &settings).await
 }
 
 #[tauri::command]
@@ -311,7 +342,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(AppState { settings: Mutex::new(Settings::load()), playing: AtomicBool::new(false) })
         .invoke_handler(tauri::generate_handler![
-            get_state, save_settings, set_language, detect_locale, login, logout, server_status, news, checks, repair, play
+            get_state, save_settings, set_language, detect_locale, login, logout, server_status, news, client_status, update_client, addons_status, update_addons, checks, repair, play
         ])
         .run(tauri::generate_context!())
         .expect("error while running Forever Launcher");

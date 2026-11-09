@@ -299,6 +299,45 @@ const TEXTS = {
   },
 };
 
+
+// Обновление клиента и аддонов.
+Object.assign(TEXTS.ru, {
+  updatesTitle: 'Обновление',
+  checkClient: 'Проверить клиент',
+  updateClient: 'Обновить клиент',
+  updateAddons: 'Обновить аддоны',
+  clientUpToDate: 'Клиент обновлён',
+  clientUpdateAvailable: 'Доступно обновление клиента: {files} файлов, {size}',
+  clientProgress: '{current} / {total} · {percent}%',
+  clientStarting: 'Начинаем загрузку клиента…',
+  clientDone: 'Клиент обновлён',
+  addonsUpToDate: 'Аддоны обновлены',
+  addonsUpdateAvailable: 'Доступно обновление аддонов: {files} файлов',
+  addonsProgress: '{current} / {total} · {percent}%',
+  addonsStarting: 'Начинаем загрузку аддонов…',
+  addonsDone: 'Аддоны обновлены',
+  updateError: 'Ошибка обновления: {e}',
+  clientNotice: 'Клиент не обновлён. Откройте настройки и нажмите «Обновить клиент».',
+});
+Object.assign(TEXTS.en, {
+  updatesTitle: 'Updates',
+  checkClient: 'Check client',
+  updateClient: 'Update client',
+  updateAddons: 'Update addons',
+  clientUpToDate: 'Client is up to date',
+  clientUpdateAvailable: 'Client update available: {files} files, {size}',
+  clientProgress: '{current} / {total} · {percent}%',
+  clientStarting: 'Starting client download…',
+  clientDone: 'Client updated',
+  addonsUpToDate: 'Addons are up to date',
+  addonsUpdateAvailable: 'Addon update available: {files} files',
+  addonsProgress: '{current} / {total} · {percent}%',
+  addonsStarting: 'Starting addon download…',
+  addonsDone: 'Addons updated',
+  updateError: 'Update error: {e}',
+  clientNotice: 'The client is not up to date. Open Settings and click “Update client”.',
+});
+
 let lang = 'ru';
 
 /// fr, en, es or pt from a setting ('' = system language) or a browser language tag.
