@@ -194,7 +194,9 @@ pub async fn client_status(settings: &Settings) -> Result<ClientStatus, String> 
             changed_files += 1;
         }
     }
-    let up_to_date = local == manifest.version && changed_files == 0;
+    // Отсутствие .launcher_version у готового клиента не делает его устаревшим:
+    // сравниваем реальные размеры файлов.
+    let up_to_date = changed_files == 0;
     Ok(ClientStatus {
         version: manifest.version,
         build: manifest.build,
