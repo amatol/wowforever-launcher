@@ -5,6 +5,7 @@ mod config;
 mod dpapi;
 mod game;
 mod i18n;
+mod launcher_update;
 #[cfg(target_os = "macos")]
 mod macos;
 // macOS: no external memory patch (see macos.rs); kept for its tests
@@ -183,6 +184,26 @@ async fn update_addons(app: AppHandle, state: State<'_, AppState>) -> Result<(),
 }
 
 #[tauri::command]
+async fn launcher_update_status(
+    state: State<'_, AppState>,
+) -> Result<launcher_update::LauncherUpdateStatus, String> {
+    let settings = state.settings.lock().unwrap().clone();
+    launcher_update::status(&settings).await
+}
+
+#[tauri::command]
+async fn install_launcher_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    if state.playing.load(Ordering::SeqCst) {
+        return Err("Нельзя обновлять лаунчер во время игры".into());
+    }
+    let settings = state.settings.lock().unwrap().clone();
+    launcher_update::install(&app, &settings).await
+}
+
+#[tauri::command]
 async fn checks(state: State<'_, AppState>) -> Result<system::Checks, String> {
     let settings = state.settings.lock().unwrap().clone();
     tokio::task::spawn_blocking(move || system::check(&settings)).await.map_err(|e| e.to_string())
@@ -342,7 +363,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(AppState { settings: Mutex::new(Settings::load()), playing: AtomicBool::new(false) })
         .invoke_handler(tauri::generate_handler![
-            get_state, save_settings, set_language, detect_locale, login, logout, server_status, news, client_status, update_client, addons_status, update_addons, checks, repair, play
+            get_state, save_settings, set_language, detect_locale, login, logout, server_status, news, client_status, update_client, addons_status, update_addons, launcher_update_status, install_launcher_update, checks, repair, play
         ])
         .run(tauri::generate_context!())
         .expect("error while running Forever Launcher");

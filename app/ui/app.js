@@ -8,6 +8,8 @@ let draft = null;      // settings being edited in the drawer
 let toastTimer = 0;
 let clientStatus = null;
 let updating = false;
+let launcherUpdate = null;
+let launcherUpdating = false;
 
 function toast(text) {
   const t = $('toast');
@@ -79,6 +81,74 @@ async function refreshAddonsStatus() {
       : t('addonsUpdateAvailable', { files: status.changedFiles });
   } catch (e) {
     $('addons-state').textContent = t('updateError', { e });
+  }
+}
+
+async function refreshLauncherUpdate() {
+  try {
+    launcherUpdate = await invoke('launcher_update_status');
+  } catch (e) {
+    console.debug('launcher update:', e);
+    $('launcher-update').hidden = true;
+    return;
+  }
+  if (!launcherUpdate.available || !launcherUpdate.supported) {
+    $('launcher-update').hidden = true;
+    return;
+  }
+  $('launcher-update-detail').textContent = t('launcherUpdateDetail', {
+    version: launcherUpdate.version,
+    size: formatBytes(launcherUpdate.size),
+  });
+  $('launcher-update-btn').disabled = false;
+  $('launcher-update-btn').textContent = t('launcherUpdateButton');
+  $('launcher-update').hidden = false;
+}
+
+function handleLauncherUpdateEvent(payload) {
+  if (payload.kind === 'start') {
+    $('launcher-update-detail').textContent = t('launcherUpdateDownloading');
+    return;
+  }
+  if (payload.kind === 'progress') {
+    const percent = Math.max(0, Math.min(100, Number(payload.percent) || 0));
+    $('launcher-update-detail').textContent = t('launcherUpdateProgress', { percent: percent.toFixed(0) });
+    return;
+  }
+  if (payload.kind === 'done') {
+    $('launcher-update-detail').textContent = t('launcherUpdateDone');
+    return;
+  }
+  if (payload.kind === 'error') {
+    const message = t('launcherUpdateError', { e: payload.message });
+    $('launcher-update-detail').textContent = message;
+    toast(message);
+    launcherUpdating = false;
+    updatePlayButton();
+    $('launcher-update-btn').disabled = false;
+    $('launcher-update-btn').textContent = t('launcherUpdateButton');
+  }
+}
+
+async function installLauncherUpdate() {
+  if (launcherUpdating || !launcherUpdate) return;
+  launcherUpdating = true;
+  updatePlayButton();
+  const btn = $('launcher-update-btn');
+  btn.disabled = true;
+  btn.textContent = t('working');
+  $('launcher-update-detail').textContent = t('launcherUpdateDownloading');
+  try {
+    await invoke('install_launcher_update');
+  } catch (e) {
+    const message = t('launcherUpdateError', { e });
+    $('launcher-update-detail').textContent = message;
+    toast(message);
+  } finally {
+    launcherUpdating = false;
+    updatePlayButton();
+    btn.disabled = false;
+    btn.textContent = t('launcherUpdateButton');
   }
 }
 
@@ -169,7 +239,7 @@ async function refresh() {
 
 function updatePlayButton() {
   const play = $('play');
-  play.disabled = state.playing || !state.gameFound || updating;
+  play.disabled = state.playing || !state.gameFound || updating || launcherUpdating;
   play.classList.toggle('running', state.playing);
   play.textContent = state.playing ? t('inGame') : t('play');
   if (!state.gameFound && !state.playing) setStep(t('chooseGameDir'), 'err');
@@ -388,8 +458,10 @@ $('check-client').addEventListener('click', async () => {
 });
 $('update-client').addEventListener('click', () => runUpdate('client', 'update_client', 'clientStarting'));
 $('update-addons').addEventListener('click', () => runUpdate('addons', 'update_addons', 'addonsStarting'));
+$('launcher-update-btn').addEventListener('click', installLauncherUpdate);
 listen('client', ({ payload }) => handleUpdateEvent(payload, 'client'));
 listen('addons', ({ payload }) => handleUpdateEvent(payload, 'addons'));
+listen('launcher-update', ({ payload }) => handleLauncherUpdateEvent(payload));
 
 $('save-settings').addEventListener('click', async () => {
   draft.gameDir = $('s-game-dir').value.trim();
@@ -412,6 +484,7 @@ $('save-settings').addEventListener('click', async () => {
     refreshStatus();
     refreshChecks();
     refreshNews();
+    refreshLauncherUpdate();
     toast(t('saved'));
   } catch (e) {
     toast(t('saveFailed', { e }));
@@ -489,6 +562,7 @@ rotateBackground();
   await refresh();
   refreshStatus();
   refreshNews();
+  refreshLauncherUpdate();
   if (state.email) refreshChecks();
   setInterval(refreshStatus, 20000);
 })();

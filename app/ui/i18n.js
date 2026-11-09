@@ -338,6 +338,26 @@ Object.assign(TEXTS.en, {
   clientNotice: 'The client is not up to date. Open Settings and click “Update client”.',
 });
 
+// Самообновление лаунчера.
+Object.assign(TEXTS.ru, {
+  launcherUpdateTitle: 'Доступно обновление лаунчера',
+  launcherUpdateDetail: 'Версия {version} · {size}',
+  launcherUpdateButton: 'Обновить и перезапустить',
+  launcherUpdateDownloading: 'Скачиваем обновление…',
+  launcherUpdateProgress: 'Загрузка: {percent}%',
+  launcherUpdateDone: 'Обновление загружено, лаунчер перезапустится…',
+  launcherUpdateError: 'Не удалось обновить лаунчер: {e}',
+});
+Object.assign(TEXTS.en, {
+  launcherUpdateTitle: 'Launcher update available',
+  launcherUpdateDetail: 'Version {version} · {size}',
+  launcherUpdateButton: 'Update and restart',
+  launcherUpdateDownloading: 'Downloading the update…',
+  launcherUpdateProgress: 'Downloading: {percent}%',
+  launcherUpdateDone: 'Update downloaded, the launcher will restart…',
+  launcherUpdateError: 'Could not update the launcher: {e}',
+});
+
 let lang = 'ru';
 
 /// fr, en, es or pt from a setting ('' = system language) or a browser language tag.
