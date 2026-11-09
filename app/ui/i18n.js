@@ -306,7 +306,7 @@ function resolveLanguage(setting) {
   const wanted = setting ? [setting] : navigator.languages || [navigator.language];
   for (const tag of wanted) {
     const code = String(tag).slice(0, 2).toLowerCase();
-    if (TEXTS[code]) return code;
+    if (code === 'ru' || code === 'en') return code;
   }
   return 'en';
 }
