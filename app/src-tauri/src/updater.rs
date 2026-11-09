@@ -71,6 +71,7 @@ pub struct ClientStatus {
     pub version: String,
     pub build: String,
     pub local_version: String,
+    pub local_build: String,
     pub total_files: usize,
     pub total_bytes: u64,
     pub changed_files: usize,
@@ -180,6 +181,8 @@ pub async fn client_status(settings: &Settings) -> Result<ClientStatus, String> 
     let manifest = fetch_client_manifest(settings).await?;
     let root = client_root(settings)?;
     let local = local_version(&root);
+    let local_build = crate::config::installed_version(&root.join("_forever_")).unwrap_or_default();
+    let build_differs = !manifest.build.is_empty() && local_build != manifest.build;
     let mut changed_files = 0usize;
     let mut changed_bytes = 0u64;
     for file in &manifest.files {
@@ -194,13 +197,20 @@ pub async fn client_status(settings: &Settings) -> Result<ClientStatus, String> 
             changed_files += 1;
         }
     }
+    if build_differs {
+        changed_files += 1;
+        changed_bytes = changed_bytes.saturating_add(
+            manifest.files.iter().find(|file| file.path == ".build.info").map(|file| file.size).unwrap_or(0),
+        );
+    }
     // Отсутствие .launcher_version у готового клиента не делает его устаревшим:
-    // сравниваем реальные размеры файлов.
+    // сравниваем реальные размеры файлов и build из .build.info.
     let up_to_date = changed_files == 0;
     Ok(ClientStatus {
         version: manifest.version,
         build: manifest.build,
         local_version: local,
+        local_build,
         total_files: manifest.files.len(),
         total_bytes: manifest.files.iter().map(|file| file.size).sum(),
         changed_files,
@@ -213,11 +223,23 @@ pub async fn update_client(app: &AppHandle, settings: &Settings) -> Result<(), S
     let manifest = fetch_client_manifest(settings).await?;
     let root = client_root(settings)?;
     let local = local_version(&root);
+    let local_build = crate::config::installed_version(&root.join("_forever_")).unwrap_or_default();
+    let build_differs = !manifest.build.is_empty() && local_build != manifest.build;
     let mut entries = Vec::new();
     for file in &manifest.files {
         let relative = safe_relative(&file.path)?;
         let path = root.join(&relative);
         if file_size(&path) != Some(file.size) {
+            entries.push(DownloadEntry {
+                path: file.path.clone(),
+                url: file.http_url.clone(),
+                size: file.size,
+                sha256: file.sha256.clone(),
+            });
+        }
+    }
+    if build_differs && !entries.iter().any(|entry| entry.path == ".build.info") {
+        if let Some(file) = manifest.files.iter().find(|file| file.path == ".build.info") {
             entries.push(DownloadEntry {
                 path: file.path.clone(),
                 url: file.http_url.clone(),

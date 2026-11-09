@@ -46,3 +46,10 @@ npx @tauri-apps/cli@2 build --bundles nsis
 `app/src-tauri/resources/forever_root_ca.crt` — только публичный сертификат.
 Приватный ключ CA хранится на сервере в `/root/wowserver/certs/ca/` и никогда
 не публикуется.
+
+## Обновление клиента и аддонов
+
+Лаунчер проверяет `https://forever.mmolabs.ru/launcher/manifest.json` и
+`addons_manifest.json`, скачивает недостающие/изменённые файлы, проверяет
+SHA-256 и атомарно заменяет их. Клиентские данные и аддоны раздаются нашим
+сервером; Blizzard CDN для игроков не используется.
