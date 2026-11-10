@@ -253,7 +253,9 @@ async fn start(app: &AppHandle, settings: Settings) -> Result<(), String> {
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         game::write_wtf(&s)?;
         #[cfg(target_os = "linux")]
-        system::install_ca_in_prefix(&s)?;
+        if !s.server.system_ca {
+            system::install_ca_in_prefix(&s)?;
+        }
         let account = login.game_accounts.first().map(|a| a.name.clone()).unwrap_or_else(|| "WoW1".into());
         let portal = format!("{}:{}", s.server.portal, s.server.bnet_port);
         #[cfg(not(target_os = "macos"))]

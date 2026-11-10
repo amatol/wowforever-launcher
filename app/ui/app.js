@@ -407,6 +407,7 @@ function fillSettings() {
   $('s-address').value = draft.server.address;
   $('s-website').value = draft.server.website;
   $('s-portal').value = draft.server.portal;
+  $('s-system-ca').checked = !!draft.server.systemCa;
   gameDirState();
 }
 
@@ -480,6 +481,7 @@ $('save-settings').addEventListener('click', async () => {
   draft.server.address = $('s-address').value.trim();
   draft.server.website = $('s-website').value.trim();
   draft.server.portal = $('s-portal').value.trim();
+  draft.server.systemCa = $('s-system-ca').checked;
   try {
     await invoke('save_settings', { settings: draft });
     closeSettings();

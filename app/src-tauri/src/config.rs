@@ -22,6 +22,8 @@ pub struct Server {
     pub public_key: String,
     pub region_group: u32,
     pub website: String,
+    /// Trust the platform root store (Let's Encrypt) instead of the private CA.
+    pub system_ca: bool,
 }
 
 /// A build-time setting (FOREVER_SERVER_ADDRESS...), set by GitHub Actions from the repository variables.
@@ -43,6 +45,7 @@ impl Default for Server {
             public_key: STOCK_PUBLIC_KEY.into(),
             region_group: 8,
             website: built_in(option_env!("FOREVER_WEBSITE"), "https://forever.mmolabs.ru/launcher"),
+            system_ca: false,
         }
     }
 }

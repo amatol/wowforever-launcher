@@ -358,6 +358,14 @@ Object.assign(TEXTS.en, {
   launcherUpdateError: 'Could not update the launcher: {e}',
 });
 
+// Системный CA для Let's Encrypt / своего домена.
+Object.assign(TEXTS.ru, {
+  systemCa: 'Доверять системному CA (Let\'s Encrypt)',
+});
+Object.assign(TEXTS.en, {
+  systemCa: 'Trust the system CA (Let\'s Encrypt)',
+});
+
 let lang = 'ru';
 
 /// fr, en, es or pt from a setting ('' = system language) or a browser language tag.

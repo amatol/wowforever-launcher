@@ -74,7 +74,10 @@ mod imp {
 
     const HOSTS: &str = r"C:\Windows\System32\drivers\etc\hosts";
 
-    pub fn certificate_status(_: &Settings) -> (bool, String) {
+    pub fn certificate_status(settings: &Settings) -> (bool, String) {
+        if settings.server.system_ca {
+            return (true, t("cert_ok_windows").into());
+        }
         unsafe {
             let Ok(store) = CertOpenSystemStoreW(None, w!("ROOT")) else {
                 return (false, t("cert_store_unreadable").into());
@@ -97,6 +100,9 @@ mod imp {
         let ip = server_ip(&settings.server)?;
         if !valid_portal(&settings.server.portal) {
             return Err(t("bad_portal").into());
+        }
+        if settings.server.system_ca && portal_resolves_to(&settings.server.portal) == Some(ip) {
+            return Ok(());
         }
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let params = HSTRING::from(format!("--admin-setup {ip} {}", settings.server.portal));
@@ -193,7 +199,10 @@ killall -HUP mDNSResponder || true
         Ok(path)
     }
 
-    pub fn certificate_status(_: &Settings) -> (bool, String) {
+    pub fn certificate_status(settings: &Settings) -> (bool, String) {
+        if settings.server.system_ca {
+            return (true, t("cert_ok_macos").into());
+        }
         // the client checks the certificate with the system trust settings (keychain)
         let ok = write_file("forever_root_ca.crt", CA_PEM)
             .ok()
@@ -208,6 +217,9 @@ killall -HUP mDNSResponder || true
         let portal = &settings.server.portal;
         if !valid_portal(portal) {
             return Err(t("bad_portal").into());
+        }
+        if settings.server.system_ca && portal_resolves_to(portal) == Some(ip) {
+            return Ok(());
         }
         if portal_resolves_to(portal) != Some(ip) {
             let script = write_file("hosts.sh", HOSTS_SCRIPT)?;
@@ -393,6 +405,9 @@ mod imp {
     }
 
     pub fn certificate_status(settings: &Settings) -> (bool, String) {
+        if settings.server.system_ca {
+            return (true, t("cert_ok_prefix").into());
+        }
         // the client checks the certificate with the Windows root store of its Wine prefix
         if prefix_has_ca(&settings.linux.prefix) {
             (true, t("cert_ok_prefix").into())
@@ -428,6 +443,9 @@ mod imp {
         if !valid_portal(portal) {
             return Err(t("bad_portal").into());
         }
+        if settings.server.system_ca && portal_resolves_to(portal) == Some(ip) {
+            return Ok(());
+        }
         if portal_resolves_to(portal) != Some(ip) {
             // /etc/hosts through pkexec; arguments are passed separately, never interpolated into the script
             let script = r#"set -e
@@ -442,8 +460,10 @@ rm -f "$t""#;
                 Ok(_) | Err(_) => errors.push(t("hosts_write_failed_pkexec").to_string()),
             }
         }
-        if let Err(e) = install_ca_in_prefix(settings) {
-            errors.push(e);
+        if !settings.server.system_ca {
+            if let Err(e) = install_ca_in_prefix(settings) {
+                errors.push(e);
+            }
         }
         if errors.is_empty() { Ok(()) } else { Err(errors.join(" ; ")) }
     }

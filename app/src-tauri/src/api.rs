@@ -52,15 +52,20 @@ fn basic(ticket: &str) -> String {
 impl Api {
     pub async fn new(server: &Server) -> Result<Self> {
         let addr = resolve(&server.address, server.rest_port).await?;
-        let ca = reqwest::Certificate::from_pem(CA_PEM.as_bytes()).map_err(|e| e.to_string())?;
         let builder = reqwest::Client::builder();
         #[cfg(not(windows))]
         let builder = builder.use_rustls_tls();
         #[cfg(windows)]
         let builder = builder.use_native_tls();
+        // A public Let's Encrypt certificate is validated by the OS/rustls roots;
+        // the private CA is only needed for the default *.actual.battle.net portal.
+        let builder = if server.system_ca {
+            builder.tls_built_in_root_certs(true)
+        } else {
+            let ca = reqwest::Certificate::from_pem(CA_PEM.as_bytes()).map_err(|e| e.to_string())?;
+            builder.tls_built_in_root_certs(false).add_root_certificate(ca)
+        };
         let client = builder
-            .tls_built_in_root_certs(false)
-            .add_root_certificate(ca)
             .resolve(&server.portal, addr)
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(15))
