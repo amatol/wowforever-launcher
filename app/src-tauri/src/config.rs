@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Public half of the Ed25519 key built into stock TrinityCore (used by the forever branch too).
 pub const STOCK_PUBLIC_KEY: &str = "02596F0D0C061A8B30745988FD72C59E29EC367FB0F341F28E0F08D037BAFC69";
@@ -95,6 +96,19 @@ pub struct Session {
     pub expires: u64,
 }
 
+pub const SESSION_DAYS: u64 = 30;
+pub const DAY_SECONDS: u64 = 24 * 60 * 60;
+
+pub fn now() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// New expiry after a successful `launcher/login`: bnetserver extends the
+/// token by 30 days on every successful exchange.
+pub fn session_expires() -> u64 {
+    now() + SESSION_DAYS * DAY_SECONDS
+}
+
 pub const LOCALES: &[&str] = &["frFR", "enUS", "enGB", "deDE", "esES", "esMX", "itIT", "ptBR", "ruRU", "koKR", "zhCN", "zhTW"];
 
 pub fn home() -> PathBuf {
@@ -163,6 +177,10 @@ impl Settings {
 }
 
 impl Session {
+    pub fn is_expired(&self) -> bool {
+        self.expires <= now()
+    }
+
     pub fn load() -> Option<Self> {
         read_json::<Session>(&config_dir().join("session.json")).filter(|s| !s.token.is_empty())
     }

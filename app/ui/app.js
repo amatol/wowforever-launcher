@@ -351,8 +351,7 @@ async function prepareClientConfig() {
   }
 }
 
-async function refresh() {
-  state = await invoke('get_state');
+function applyState() {
   setLanguage(state.settings.language);
   $('realm-field').textContent = t('realm', { name: state.settings.server.name || 'Дримворлд Навсегда' });
   $('version').textContent = `v${state.version} · ${{ windows: 'Windows', macos: 'macOS', linux: 'Linux' }[state.platform]}`;
@@ -367,9 +366,28 @@ async function refresh() {
     $('avatar').textContent = state.email[0].toUpperCase();
   }
   updatePlayButton();
+}
+
+async function refresh() {
+  state = await invoke('get_state');
+  applyState();
   if (state.gameFound) prepareClientConfig();
   await refreshSetupChecks();
   refreshClientStatus();
+
+  // 30-day token: bnetserver extends it on every successful launcher/login.
+  // Do it in the background so a slow/offline server does not block the UI.
+  const current = state;
+  invoke('refresh_session').then((email) => {
+    if (state !== current) return;
+    if (email === null && state.email) {
+      state.email = null;
+      applyState();
+    } else if (email && email !== state.email) {
+      state.email = email;
+      applyState();
+    }
+  }).catch((e) => console.debug('session:', e));
 }
 
 function updatePlayButton() {

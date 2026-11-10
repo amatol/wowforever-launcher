@@ -74,7 +74,7 @@ fn get_state(state: State<AppState>) -> Snapshot {
     Snapshot {
         game_found: settings.game_found(),
         game_version: config::installed_version(std::path::Path::new(&settings.game_dir)),
-        email: Session::load().map(|s| s.email),
+        email: Session::load().filter(|s| !s.is_expired()).map(|s| s.email),
         platform: if cfg!(windows) { "windows" } else if cfg!(target_os = "macos") { "macos" } else { "linux" },
         version: env!("CARGO_PKG_VERSION"),
         locales: config::LOCALES,
@@ -112,11 +112,13 @@ async fn login(state: State<'_, AppState>, email: String, password: String) -> R
     let api = api::Api::new(&server).await?;
     let ticket = api.login(email.trim(), &password).await?;
     let token = api.remember(&ticket).await?;
+    let expires = token.expires.max(config::session_expires());
     let check = api.launcher_login(&token.token).await?;
-    Session { email: check.email.clone(), token: token.token, expires: token.expires }
+    let email = check.email.to_lowercase();
+    Session { email: email.clone(), token: token.token, expires }
         .save()
         .map_err(|e| tf("session_save", &[&e]))?;
-    Ok(check.email.to_lowercase())
+    Ok(email)
 }
 
 #[tauri::command]
@@ -129,6 +131,33 @@ async fn logout(state: State<'_, AppState>) -> Result<(), String> {
     }
     Session::clear();
     Ok(())
+}
+
+/// Validates the saved 30-day token and extends it on every launcher start.
+/// Returns the account e-mail, or None when the token is expired/revoked.
+#[tauri::command]
+async fn refresh_session(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    let Some(session) = Session::load() else { return Ok(None) };
+    if session.is_expired() {
+        Session::clear();
+        return Ok(None);
+    }
+    let server = state.settings.lock().unwrap().server.clone();
+    let api = api::Api::new(&server).await?;
+    match api.launcher_login(&session.token).await {
+        Ok(login) => {
+            let email = login.email.to_lowercase();
+            Session { email: email.clone(), token: session.token, expires: config::session_expires() }
+                .save()
+                .map_err(|e| tf("session_save", &[&e]))?;
+            Ok(Some(email))
+        }
+        Err(e) if e == "expired" => {
+            Session::clear();
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[derive(Serialize)]
@@ -269,6 +298,10 @@ async fn start(app: &AppHandle, settings: Settings) -> Result<(), String> {
         return Err(t("game_not_found").into());
     }
     let session = Session::load().ok_or(t("login_first"))?;
+    if session.is_expired() {
+        Session::clear();
+        return Err(t("session_expired").into());
+    }
     emit(app, "step", t("step_connecting"));
     let api = api::Api::new(&settings.server).await?;
     let login = match api.launcher_login(&session.token).await {
@@ -396,7 +429,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(AppState { settings: Mutex::new(Settings::load()), playing: AtomicBool::new(false) })
         .invoke_handler(tauri::generate_handler![
-            get_state, save_settings, set_language, detect_locale, login, logout, server_status, news, prepare_client_config, client_status, update_client, verify_client, install_client, launcher_update_status, install_launcher_update, checks, repair, remove_patch, play
+            get_state, save_settings, set_language, detect_locale, login, logout, server_status, news, prepare_client_config, client_status, update_client, verify_client, install_client, launcher_update_status, install_launcher_update, checks, repair, remove_patch, refresh_session, play
         ])
         .run(tauri::generate_context!())
         .expect("error while running Дримворлд Навсегда");
