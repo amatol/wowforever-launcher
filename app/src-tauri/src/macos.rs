@@ -5,7 +5,6 @@
 //! logs what it does to a file this module follows. The login ticket goes to the net.battle preferences.
 
 use crate::config::{config_dir, Settings, MAC_COPY_NAME};
-use crate::game::WTF_NAME;
 use crate::i18n::{t, tf};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -177,7 +176,7 @@ pub fn spawn(settings: &Settings, copy: &Path) -> Result<(Child, PathBuf), Strin
         .arg("--env").arg(format!("FOREVER_REGION_GROUP={}", server.region_group))
         .arg("--env").arg(format!("FOREVER_PATCH_LOG={}", log.display()))
         .arg("-a").arg(copy)
-        .args(["--args", "-launcherlogin", "-config", WTF_NAME])
+        .args(["--args", "-launcherlogin"])
         .spawn()
         .map_err(|e| tf("launch_failed", &[&"World of Warcraft", &e]))?;
     Ok((child, log))

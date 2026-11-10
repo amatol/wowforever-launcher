@@ -198,7 +198,8 @@ fn prepare_client_config(state: State<'_, AppState>) -> Result<(), String> {
     if !settings.game_found() {
         return Ok(());
     }
-    game::write_wtf(&settings)
+    game::write_wtf(&settings)?;
+    game::clear_cache_once(&settings)
 }
 
 #[tauri::command]

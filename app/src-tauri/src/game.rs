@@ -7,33 +7,20 @@ use std::path::Path;
 #[cfg(not(target_os = "macos"))]
 use std::process::{Child, Command};
 
-pub const WTF_NAME: &str = "ForeverLauncher.wtf";
 #[cfg(not(target_os = "macos"))]
 const LAUNCH_OPTIONS: &str = r"Software\Blizzard Entertainment\Battle.net\Launch Options\WoW";
 
-/// Ensures the launcher's WTF/ForeverLauncher.wtf has portal and locale, and
-/// the player's WTF/Config.wtf has **only** `SET portal`. No other CVars are
-/// added, changed or removed. Config.wtf may not exist before the first
-/// launch; in that case it is created with just the portal line.
+/// Writes the portal into the player's normal WTF/Config.wtf. The old
+/// ForeverLauncher.wtf is removed: the client now starts without `-config`
+/// and uses its standard Config.wtf, exactly like the Battle.net client.
+/// Only `SET portal` is touched; all other CVars are left alone.
 pub fn write_wtf(settings: &Settings) -> Result<(), String> {
     let dir = Path::new(&settings.game_dir).join("WTF");
     std::fs::create_dir_all(&dir).map_err(|e| tf("wtf_folder", &[&e]))?;
-    let custom = dir.join(WTF_NAME);
     let config = dir.join("Config.wtf");
-
-    let config_text = std::fs::read_to_string(&config).unwrap_or_default();
-    let custom_text = std::fs::read_to_string(&custom)
-        .or_else(|_| std::fs::read_to_string(&config))
-        .unwrap_or_default();
-
-    rewrite_values(&custom, &custom_text, &[
-        ("portal", settings.server.portal.clone()),
-        ("textLocale", settings.locale.clone()),
-        ("audioLocale", settings.locale.clone()),
-    ])?;
-    rewrite_values(&config, &config_text, &[
-        ("portal", settings.server.portal.clone()),
-    ])
+    let _ = std::fs::remove_file(dir.join("ForeverLauncher.wtf"));
+    let text = std::fs::read_to_string(&config).unwrap_or_default();
+    rewrite_values(&config, &text, &[("portal", settings.server.portal.clone())])
 }
 
 fn rewrite_values(path: &Path, text: &str, wanted: &[(&str, String)]) -> Result<(), String> {
@@ -47,6 +34,25 @@ fn rewrite_values(path: &Path, text: &str, wanted: &[(&str, String)]) -> Result<
     }
     std::fs::write(path, lines.join("\r\n") + "\r\n")
         .map_err(|error| format!("{} : {error}", path.display()))
+}
+
+/// One-time cleanup of the client ADB cache after the 0.1.34 hotfix import.
+/// The DB2/hotfix cache can contain records without localized strings and
+/// crash the client on entering the world; the client rebuilds it itself.
+pub fn clear_cache_once(settings: &Settings) -> Result<(), String> {
+    let marker = crate::config::config_dir().join("cache-cleared-20261110-hotfixes");
+    if marker.exists() {
+        return Ok(());
+    }
+    let cache = Path::new(&settings.game_dir).join("Cache");
+    if cache.exists() {
+        std::fs::remove_dir_all(&cache)
+            .map_err(|error| format!("{} : {error}", cache.display()))?;
+    }
+    if let Some(parent) = marker.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    std::fs::write(&marker, b"1").map_err(|error| error.to_string())
 }
 
 /// Stores the login ticket where the client reads it with -launcherlogin.
@@ -101,7 +107,7 @@ pub fn write_launch_options(settings: &Settings, portal: &str, ticket: &str, gam
 #[cfg(windows)]
 pub fn spawn(settings: &Settings) -> Result<Child, String> {
     Command::new(settings.exe())
-        .args(["-launcherlogin", "-config", WTF_NAME])
+        .args(["-launcherlogin"])
         .current_dir(&settings.game_dir)
         .spawn()
         .map_err(|e| tf("launch_failed", &[&"Wow.exe", &e]))
@@ -112,7 +118,7 @@ pub fn spawn(settings: &Settings) -> Result<Child, String> {
     let (runner, mut env) = crate::system::runner(settings)?;
     let mut cmd: Vec<String> = runner;
     cmd.push(settings.exe().to_string_lossy().into_owned());
-    cmd.extend(["-launcherlogin", "-config", WTF_NAME].map(String::from));
+    cmd.push("-launcherlogin".into());
     let l = &settings.linux;
     if l.gamescope && crate::system::which("gamescope") {
         // gamescope starts its own Xwayland with a US keyboard unless told otherwise
