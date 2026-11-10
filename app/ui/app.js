@@ -157,6 +157,16 @@ function handleUpdateEvent(payload) {
     $('client-notice').hidden = false;
     return;
   }
+  if (payload.kind === 'verify') {
+    const percent = Math.max(0, Math.min(100, Number(payload.percent) || 0));
+    $('update-progress').hidden = false;
+    $('update-bar').style.width = `${percent}%`;
+    const detail = t('clientChecking', { percent: percent.toFixed(1) });
+    $('update-detail').textContent = detail;
+    $('client-notice').textContent = detail;
+    $('client-notice').hidden = false;
+    return;
+  }
   if (payload.kind === 'progress') {
     const percent = Math.max(0, Math.min(100, Number(payload.percent) || 0));
     $('update-progress').hidden = false;
@@ -227,6 +237,27 @@ async function runUpdate(prefix, command, startKey) {
   $('update-detail').textContent = t(startKey);
   try {
     await invoke(command);
+  } catch (e) {
+    $('update-detail').textContent = t('updateError', { e });
+    toast(t('updateError', { e }));
+  } finally {
+    updating = false;
+    updatePlayButton();
+    refreshClientStatus();
+  }
+}
+
+async function runVerify() {
+  if (updating) return;
+  updating = true;
+  updatePlayButton();
+  $('update-progress').hidden = false;
+  $('update-bar').style.width = '0%';
+  $('update-detail').textContent = t('clientCheckingStart');
+  $('client-notice').textContent = t('clientCheckingStart');
+  $('client-notice').hidden = false;
+  try {
+    await invoke('verify_client');
   } catch (e) {
     $('update-detail').textContent = t('updateError', { e });
     toast(t('updateError', { e }));
@@ -452,10 +483,7 @@ $('pick-prefix').addEventListener('click', () => pick($('s-prefix'), t('pickPref
 $('s-game-dir').addEventListener('input', gameDirState);
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('settings').hidden) closeSettings(); });
 
-$('check-client').addEventListener('click', async () => {
-  await refreshClientStatus();
-  if (clientStatus && clientStatus.upToDate) toast(t('clientUpToDate'));
-});
+$('check-client').addEventListener('click', runVerify);
 $('update-client').addEventListener('click', () => runUpdate('client', 'update_client', 'clientStarting'));
 $('launcher-update-btn').addEventListener('click', installLauncherUpdate);
 listen('client', ({ payload }) => handleUpdateEvent(payload));

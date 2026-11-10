@@ -204,22 +204,90 @@ pub async fn client_status(settings: &Settings) -> Result<ClientStatus, String> 
 }
 
 pub async fn update_client(app: &AppHandle, settings: &Settings) -> Result<(), String> {
+    update_client_inner(app, settings, false).await
+}
+
+/// Полная проверка: SHA-256 каждого файла и восстановление несовпавших.
+pub async fn verify_client(app: &AppHandle, settings: &Settings) -> Result<(), String> {
+    update_client_inner(app, settings, true).await
+}
+
+async fn update_client_inner(
+    app: &AppHandle,
+    settings: &Settings,
+    full: bool,
+) -> Result<(), String> {
     let manifest = fetch_client_manifest(settings).await?;
     let root = client_root(settings)?;
     let local = local_version(&root);
     let local_build = crate::config::installed_version(&root.join("_forever_")).unwrap_or_default();
     let build_differs = !manifest.build.is_empty() && local_build != manifest.build;
+    let total_files = manifest.files.len();
+    let total_bytes: u64 = manifest.files.iter().map(|file| file.size).sum();
     let mut entries = Vec::new();
-    for file in &manifest.files {
+    let mut checked_bytes = 0u64;
+    let mut last_emit = Instant::now();
+    if full {
+        emit(
+            app,
+            "client",
+            UpdateEvent {
+                kind: "verify".into(),
+                file: String::new(),
+                current: 0,
+                total: total_files,
+                downloaded: 0,
+                total_bytes,
+                percent: 0.0,
+                message: String::new(),
+            },
+        );
+    }
+    for (index, file) in manifest.files.iter().enumerate() {
         let relative = safe_relative(&file.path)?;
         let path = root.join(&relative);
-        if !file_matches(&path, file.size, &file.sha256, file.verify_sha256) {
+        let matches = if full {
+            let path = path.clone();
+            let size = file.size;
+            let sha = file.sha256.clone();
+            tokio::task::spawn_blocking(move || file_matches(&path, size, &sha, true))
+                .await
+                .unwrap_or(false)
+        } else {
+            file_matches(&path, file.size, &file.sha256, file.verify_sha256)
+        };
+        if !matches {
             entries.push(DownloadEntry {
                 path: file.path.clone(),
                 url: file.http_url.clone(),
                 size: file.size,
                 sha256: file.sha256.clone(),
             });
+        }
+        if full {
+            checked_bytes = checked_bytes.saturating_add(file.size);
+            if last_emit.elapsed() >= Duration::from_millis(200) || index + 1 == total_files {
+                last_emit = Instant::now();
+                let percent = if total_bytes > 0 {
+                    (checked_bytes as f64 / total_bytes as f64 * 100.0).min(99.9)
+                } else {
+                    0.0
+                };
+                emit(
+                    app,
+                    "client",
+                    UpdateEvent {
+                        kind: "verify".into(),
+                        file: file.path.clone(),
+                        current: index + 1,
+                        total: total_files,
+                        downloaded: checked_bytes,
+                        total_bytes,
+                        percent,
+                        message: String::new(),
+                    },
+                );
+            }
         }
     }
     if build_differs && !entries.iter().any(|entry| entry.path == ".build.info") {

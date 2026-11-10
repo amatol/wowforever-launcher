@@ -169,6 +169,15 @@ async fn update_client(app: AppHandle, state: State<'_, AppState>) -> Result<(),
 }
 
 #[tauri::command]
+async fn verify_client(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    if state.playing.load(Ordering::SeqCst) {
+        return Err("Нельзя проверять клиент во время игры".into());
+    }
+    let settings = state.settings.lock().unwrap().clone();
+    updater::verify_client(&app, &settings).await
+}
+
+#[tauri::command]
 async fn install_client(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -372,7 +381,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(AppState { settings: Mutex::new(Settings::load()), playing: AtomicBool::new(false) })
         .invoke_handler(tauri::generate_handler![
-            get_state, save_settings, set_language, detect_locale, login, logout, server_status, news, client_status, update_client, install_client, launcher_update_status, install_launcher_update, checks, repair, play
+            get_state, save_settings, set_language, detect_locale, login, logout, server_status, news, client_status, update_client, verify_client, install_client, launcher_update_status, install_launcher_update, checks, repair, play
         ])
         .run(tauri::generate_context!())
         .expect("error while running Дримворлд Навсегда");
