@@ -1,4 +1,4 @@
-//! Обновление клиента и аддонов с сервера Forever AI.
+//! Обновление клиента с сервера Дримворлд Навсегда.
 
 use crate::config::Settings;
 use futures_util::{stream, StreamExt};
@@ -34,28 +34,6 @@ pub struct ClientManifest {
     pub removed_files: Vec<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct AddonFile {
-    pub path: String,
-    pub download_url: String,
-    pub sha256: String,
-    pub size: u64,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct Addon {
-    pub name: String,
-    #[serde(default)]
-    pub version: String,
-    pub folders: Vec<String>,
-    pub files: Vec<AddonFile>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct AddonsManifest {
-    pub addons: Vec<Addon>,
-}
-
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateEvent {
@@ -78,16 +56,6 @@ pub struct ClientStatus {
     pub local_build: String,
     pub total_files: usize,
     pub total_bytes: u64,
-    pub changed_files: usize,
-    pub changed_bytes: u64,
-    pub up_to_date: bool,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AddonsStatus {
-    pub addons: usize,
-    pub total_files: usize,
     pub changed_files: usize,
     pub changed_bytes: u64,
     pub up_to_date: bool,
@@ -126,11 +94,6 @@ fn client_root(settings: &Settings) -> Result<PathBuf, String> {
     Err("Не найдена папка _forever_ с Wow.exe".into())
 }
 
-fn addons_root(settings: &Settings) -> Result<PathBuf, String> {
-    let root = client_root(settings)?;
-    Ok(root.join("_forever_").join("Interface").join("AddOns"))
-}
-
 fn safe_relative(path: &str) -> Result<PathBuf, String> {
     let relative = Path::new(path);
     if relative.as_os_str().is_empty() || relative.is_absolute() {
@@ -163,11 +126,6 @@ async fn get_json<T: for<'de> Deserialize<'de>>(url: &str) -> Result<T, String> 
 
 async fn fetch_client_manifest(settings: &Settings) -> Result<ClientManifest, String> {
     let url = format!("{}/manifest.json", base_url(settings)?);
-    get_json(&url).await
-}
-
-async fn fetch_addons_manifest(settings: &Settings) -> Result<AddonsManifest, String> {
-    let url = format!("{}/addons_manifest.json", base_url(settings)?);
     get_json(&url).await
 }
 
@@ -350,61 +308,6 @@ pub async fn install_client(
     std::fs::write(root.join(".launcher_version"), format!("{}\n", manifest.version))
         .map_err(|error| format!("Не удалось записать версию клиента: {error}"))?;
     emit(app, "client", done_event(0, 0, 0, 0, "Клиент установлен"));
-    Ok(())
-}
-
-pub async fn addons_status(settings: &Settings) -> Result<AddonsStatus, String> {
-    let manifest = fetch_addons_manifest(settings).await?;
-    let root = addons_root(settings)?;
-    let mut total_files = 0usize;
-    let mut changed_files = 0usize;
-    let mut changed_bytes = 0u64;
-    for addon in &manifest.addons {
-        for file in &addon.files {
-            total_files += 1;
-            let path = root.join(safe_relative(&file.path)?);
-            if !file_matches(&path, file.size, &file.sha256, true) {
-                changed_files += 1;
-                changed_bytes = changed_bytes.saturating_add(file.size);
-            }
-        }
-    }
-    Ok(AddonsStatus {
-        addons: manifest.addons.len(),
-        total_files,
-        changed_files,
-        changed_bytes,
-        up_to_date: changed_files == 0,
-    })
-}
-
-pub async fn update_addons(app: &AppHandle, settings: &Settings) -> Result<(), String> {
-    let manifest = fetch_addons_manifest(settings).await?;
-    let root = addons_root(settings)?;
-    std::fs::create_dir_all(&root)
-        .map_err(|error| format!("Не удалось создать папку аддонов: {error}"))?;
-    let mut entries = Vec::new();
-    for addon in &manifest.addons {
-        for file in &addon.files {
-            let relative = safe_relative(&file.path)?;
-            if !file_matches(&root.join(&relative), file.size, &file.sha256, true) {
-                entries.push(DownloadEntry {
-                    path: file.path.clone(),
-                    url: file.download_url.clone(),
-                    size: file.size,
-                    sha256: file.sha256.clone(),
-                });
-            }
-        }
-    }
-    if entries.is_empty() {
-        emit(app, "addons", done_event(0, 0, 0, 0, "Аддоны уже обновлены"));
-        return Ok(());
-    }
-    download_entries(app, "addons", &root, entries, 6).await?;
-    std::fs::write(root.join(".launcher_addons"), format!("{}\n", manifest.addons.len()))
-        .map_err(|error| format!("Не удалось записать состояние аддонов: {error}"))?;
-    emit(app, "addons", done_event(0, 0, 0, 0, "Аддоны обновлены"));
     Ok(())
 }
 

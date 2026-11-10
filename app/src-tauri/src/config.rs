@@ -32,11 +32,11 @@ fn built_in(value: Option<&'static str>, default: &str) -> String {
 }
 
 /// Your server, from the FOREVER_SERVER_NAME / FOREVER_SERVER_ADDRESS / FOREVER_WEBSITE variables at build time.
-/// Players can still change them in Settings > Server (advanced).
+/// These values are fixed; the launcher works only with our server.
 impl Default for Server {
     fn default() -> Self {
         Self {
-            name: built_in(option_env!("FOREVER_SERVER_NAME"), "Дримворлд"),
+            name: built_in(option_env!("FOREVER_SERVER_NAME"), "Дримворлд Навсегда"),
             portal: "trinity.actual.mmolabs.ru".into(),
             address: built_in(option_env!("FOREVER_SERVER_ADDRESS"), "92.42.44.9"),
             bnet_port: 1119,
@@ -127,17 +127,9 @@ fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
 impl Settings {
     pub fn load() -> Self {
         let mut s: Settings = read_json(&config_dir().join("settings.json")).unwrap_or_default();
-        // One-time migration from the old private-CA portal and the sslip test
-        // portal to the public Let's Encrypt domain.
-        if matches!(
-            s.server.portal.as_str(),
-            "trinity.actual.battle.net" | "92.42.44.9.actual.sslip.io"
-        ) {
-            s.server.portal = "trinity.actual.mmolabs.ru".into();
-        }
-        if s.server.portal == "trinity.actual.mmolabs.ru" {
-            s.server.system_ca = true;
-        }
+        // The launcher is intentionally bound to our server only. Ignore any
+        // server/portal values left in an old settings.json.
+        s.server = Server::default();
         if s.game_dir.is_empty() {
             s.game_dir = detect_game_dir().unwrap_or_default();
         }

@@ -85,11 +85,10 @@ fn get_state(state: State<AppState>) -> Snapshot {
 }
 
 #[tauri::command]
-fn save_settings(state: State<AppState>, settings: Settings) -> Result<(), String> {
-    let mut settings = settings;
-    if settings.server.portal.is_empty() {
-        settings.server = Default::default();
-    }
+fn save_settings(state: State<AppState>, mut settings: Settings) -> Result<(), String> {
+    // The launcher works only with our server; ignore any server fields sent
+    // by an old UI or a hand-edited settings.json.
+    settings.server = Default::default();
     settings.save().map_err(|e| e.to_string())?;
     *state.settings.lock().unwrap() = settings;
     Ok(())
@@ -167,21 +166,6 @@ async fn update_client(app: AppHandle, state: State<'_, AppState>) -> Result<(),
     }
     let settings = state.settings.lock().unwrap().clone();
     updater::update_client(&app, &settings).await
-}
-
-#[tauri::command]
-async fn addons_status(state: State<'_, AppState>) -> Result<updater::AddonsStatus, String> {
-    let settings = state.settings.lock().unwrap().clone();
-    updater::addons_status(&settings).await
-}
-
-#[tauri::command]
-async fn update_addons(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    if state.playing.load(Ordering::SeqCst) {
-        return Err("Нельзя обновлять аддоны во время игры".into());
-    }
-    let settings = state.settings.lock().unwrap().clone();
-    updater::update_addons(&app, &settings).await
 }
 
 #[tauri::command]
@@ -388,8 +372,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(AppState { settings: Mutex::new(Settings::load()), playing: AtomicBool::new(false) })
         .invoke_handler(tauri::generate_handler![
-            get_state, save_settings, set_language, detect_locale, login, logout, server_status, news, client_status, update_client, addons_status, update_addons, install_client, launcher_update_status, install_launcher_update, checks, repair, play
+            get_state, save_settings, set_language, detect_locale, login, logout, server_status, news, client_status, update_client, install_client, launcher_update_status, install_launcher_update, checks, repair, play
         ])
         .run(tauri::generate_context!())
-        .expect("error while running Forever Launcher");
+        .expect("error while running Дримворлд Навсегда");
 }

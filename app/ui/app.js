@@ -78,93 +78,10 @@ async function refreshClientStatus() {
   }
 }
 
-async function refreshAddonsStatus() {
-  if (!state || !state.gameFound) {
-    $('addons-state').textContent = t('chooseGameDir');
-    return;
-  }
-  try {
-    const status = await invoke('addons_status');
-    $('addons-state').textContent = status.upToDate
-      ? t('addonsUpToDate')
-      : t('addonsUpdateAvailable', { files: status.changedFiles });
-  } catch (e) {
-    $('addons-state').textContent = t('updateError', { e });
-  }
-}
-
-async function refreshLauncherUpdate() {
-  try {
-    launcherUpdate = await invoke('launcher_update_status');
-  } catch (e) {
-    console.debug('launcher update:', e);
-    $('launcher-update').hidden = true;
-    return;
-  }
-  if (!launcherUpdate.available || !launcherUpdate.supported) {
-    $('launcher-update').hidden = true;
-    return;
-  }
-  $('launcher-update-detail').textContent = t('launcherUpdateDetail', {
-    version: launcherUpdate.version,
-    size: formatBytes(launcherUpdate.size),
-  });
-  $('launcher-update-btn').disabled = false;
-  $('launcher-update-btn').textContent = t('launcherUpdateButton');
-  $('launcher-update').hidden = false;
-}
-
-function handleLauncherUpdateEvent(payload) {
-  if (payload.kind === 'start') {
-    $('launcher-update-detail').textContent = t('launcherUpdateDownloading');
-    return;
-  }
-  if (payload.kind === 'progress') {
-    const percent = Math.max(0, Math.min(100, Number(payload.percent) || 0));
-    $('launcher-update-detail').textContent = t('launcherUpdateProgress', { percent: percent.toFixed(0) });
-    return;
-  }
-  if (payload.kind === 'done') {
-    $('launcher-update-detail').textContent = t('launcherUpdateDone');
-    return;
-  }
-  if (payload.kind === 'error') {
-    const message = t('launcherUpdateError', { e: payload.message });
-    $('launcher-update-detail').textContent = message;
-    toast(message);
-    launcherUpdating = false;
-    updatePlayButton();
-    $('launcher-update-btn').disabled = false;
-    $('launcher-update-btn').textContent = t('launcherUpdateButton');
-  }
-}
-
-async function installLauncherUpdate() {
-  if (launcherUpdating || !launcherUpdate) return;
-  launcherUpdating = true;
-  updatePlayButton();
-  const btn = $('launcher-update-btn');
-  btn.disabled = true;
-  btn.textContent = t('working');
-  $('launcher-update-detail').textContent = t('launcherUpdateDownloading');
-  try {
-    await invoke('install_launcher_update');
-  } catch (e) {
-    const message = t('launcherUpdateError', { e });
-    $('launcher-update-detail').textContent = message;
-    toast(message);
-  } finally {
-    launcherUpdating = false;
-    updatePlayButton();
-    btn.disabled = false;
-    btn.textContent = t('launcherUpdateButton');
-  }
-}
-
-function handleUpdateEvent(payload, prefix) {
-  const progressKey = prefix === 'client' ? 'clientProgress' : 'addonsProgress';
-  const startKey = prefix === 'client' ? 'clientStarting' : 'addonsStarting';
-  const doneKey = prefix === 'client' ? 'clientDone' : 'addonsDone';
+function handleUpdateEvent(payload) {
+  const progressKey = 'clientProgress';
+  const startKey = 'clientStarting';
+  const doneKey = 'clientDone';
   if (payload.kind === 'start') {
     $('update-progress').hidden = false;
     $('update-bar').style.width = '0%';
@@ -187,7 +104,6 @@ function handleUpdateEvent(payload, prefix) {
     updating = false;
     updatePlayButton();
     refreshClientStatus();
-    refreshAddonsStatus();
     return;
   }
   if (payload.kind === 'error') {
@@ -243,7 +159,6 @@ async function runUpdate(prefix, command, startKey) {
     updating = false;
     updatePlayButton();
     refreshClientStatus();
-    refreshAddonsStatus();
   }
 }
 
@@ -259,7 +174,7 @@ function setLanguage(setting) {
 async function refresh() {
   state = await invoke('get_state');
   setLanguage(state.settings.language);
-  $('realm-field').textContent = t('realm', { name: state.settings.server.name || 'Forever' });
+  $('realm-field').textContent = t('realm', { name: state.settings.server.name || 'Дримворлд Навсегда' });
   $('version').textContent = `v${state.version} · ${{ windows: 'Windows', macos: 'macOS', linux: 'Linux' }[state.platform]}`;
   $('signup').hidden = !state.settings.server.website;
   const logged = !!state.email;
@@ -442,10 +357,6 @@ function fillSettings() {
   option(language, '', t('systemLanguage'));
   Object.entries(LANGUAGES).forEach(([code, name]) => option(language, code, name));
   language.value = draft.language || '';
-  $('s-address').value = draft.server.address;
-  $('s-website').value = draft.server.website;
-  $('s-portal').value = draft.server.portal;
-  $('s-system-ca').checked = !!draft.server.systemCa;
   gameDirState();
 }
 
@@ -461,7 +372,6 @@ function gameDirState() {
 function openSettings() {
   fillSettings();
   refreshClientStatus();
-  refreshAddonsStatus();
   $('settings').hidden = false;
   $('scrim').hidden = false;
   refreshChecks();
@@ -500,10 +410,8 @@ $('check-client').addEventListener('click', async () => {
 });
 $('download-client').addEventListener('click', installClient);
 $('update-client').addEventListener('click', () => runUpdate('client', 'update_client', 'clientStarting'));
-$('update-addons').addEventListener('click', () => runUpdate('addons', 'update_addons', 'addonsStarting'));
 $('launcher-update-btn').addEventListener('click', installLauncherUpdate);
-listen('client', ({ payload }) => handleUpdateEvent(payload, 'client'));
-listen('addons', ({ payload }) => handleUpdateEvent(payload, 'addons'));
+listen('client', ({ payload }) => handleUpdateEvent(payload));
 listen('launcher-update', ({ payload }) => handleLauncherUpdateEvent(payload));
 
 $('save-settings').addEventListener('click', async () => {
@@ -517,10 +425,6 @@ $('save-settings').addEventListener('click', async () => {
     draft.linux.gamescopeArgs = $('s-gamescope-args').value.trim();
     draft.linux.keyboard = $('s-keyboard').value.trim();
   }
-  draft.server.address = $('s-address').value.trim();
-  draft.server.website = $('s-website').value.trim();
-  draft.server.portal = $('s-portal').value.trim();
-  draft.server.systemCa = $('s-system-ca').checked;
   try {
     await invoke('save_settings', { settings: draft });
     closeSettings();
@@ -537,7 +441,7 @@ $('save-settings').addEventListener('click', async () => {
 
 // ------------------------------------------------------------------------------------------------ news
 // shown until the website has a blog (<website>/api/news)
-const defaultNews = () => [1, 2, 3].map((i) => ({ tag: t(`news${i}Tag`), title: t(`news${i}`), image: '', url: '' }));
+const defaultNews = () => [1, 2, 3].map((i) => ({ tag: t(`news${i}Tag`), title: t(`news${i}`), image: '', url: 'https://t.me/amatol_blog' }));
 
 function openLink(url) {
   if (url) window.__TAURI__.opener.openUrl(url);
@@ -552,9 +456,8 @@ async function refreshNews() {
   }
   const fromSite = items.length > 0;
   if (!fromSite) items = defaultNews();
-  const website = state.settings.server.website;
-  $('news-more').hidden = !fromSite || !website;
-  $('news-more').onclick = (ev) => { ev.preventDefault(); openLink(website); };
+  $('news-more').hidden = !fromSite;
+  $('news-more').onclick = (ev) => { ev.preventDefault(); openLink('https://t.me/amatol_blog'); };
   $('news').replaceChildren(...items.slice(0, 3).map((n) => {
     const card = document.createElement('button');
     card.className = 'news-card';
@@ -583,7 +486,7 @@ async function refreshNews() {
       body.append(date);
     }
     card.append(img, body);
-    card.addEventListener('click', () => openLink(n.url || website));
+    card.addEventListener('click', () => openLink(n.url || 'https://t.me/amatol_blog'));
     return card;
   }));
 }

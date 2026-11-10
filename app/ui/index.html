@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Forever AI Launcher</title>
+  <title>Дримворлд Навсегда</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -16,7 +16,7 @@
   </div>
 
   <header class="topbar">
-    <div class="top-logo"><strong>FOREVER AI</strong><small>WoW Forever · Дримворлд</small></div>
+    <div class="top-logo"><strong>ДРИМВОРЛД НАВСЕГДА</strong><small>WoW Forever · Дримворлд Навсегда</small></div>
 
     <div class="status" id="status" data-state="unknown">
       <span class="dot"></span><span id="status-text" data-i18n="checking">Checking the server…</span>
@@ -78,7 +78,7 @@
       <div class="launch">
         <span class="label" data-i18n="versionRealm">Game version &amp; realm</span>
         <div class="field" id="game-field">WoW Forever</div>
-        <div class="field" id="realm-field">Realm Forever</div>
+        <div class="field" id="realm-field">Дримворлд Навсегда</div>
         <div class="play-group">
           <button class="btn play" id="play" disabled>Play</button>
           <button class="btn play-gear" id="play-settings" data-i18n-title="gameSettings" title="Game settings" aria-label="Game settings">
@@ -150,25 +150,14 @@
       <fieldset>
         <legend data-i18n="updatesTitle">Updates</legend>
         <p class="small" id="client-state"></p>
-        <p class="small" id="addons-state"></p>
         <div class="progress" id="update-progress" hidden><div class="progress-bar" id="update-bar"></div></div>
         <p class="small" id="update-detail"></p>
         <div class="row">
           <button class="btn small" id="check-client" data-i18n="checkClient">Check client</button>
           <button class="btn primary small" id="update-client" data-i18n="updateClient">Update client</button>
         </div>
-        <div class="row">
-          <button class="btn small" id="update-addons" data-i18n="updateAddons">Update addons</button>
-        </div>
       </fieldset>
 
-      <details class="advanced">
-        <summary data-i18n="advanced">Server (advanced)</summary>
-        <label><span data-i18n="serverAddress">Server address</span><input id="s-address" type="text" spellcheck="false"></label>
-        <label><span data-i18n="website">Website</span><input id="s-website" type="url" placeholder="https://…" spellcheck="false"></label>
-        <label><span data-i18n="portal">Portal</span><input id="s-portal" type="text" spellcheck="false"></label>
-        <label class="switch"><input id="s-system-ca" type="checkbox"><span data-i18n="systemCa">Trust the system CA (Let's Encrypt)</span></label>
-      </details>
     </div>
     <footer class="drawer-foot">
       <button class="btn ghost" id="cancel-settings" data-i18n="cancel">Cancel</button>

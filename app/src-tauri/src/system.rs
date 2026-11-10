@@ -145,7 +145,7 @@ mod imp {
                     .lines()
                     .filter(|l| !l.split('#').next().unwrap_or("").split_whitespace().skip(1).any(|h| h.eq_ignore_ascii_case(portal)))
                     .collect();
-                let entry = format!("{ip} {portal}  # Forever AI Launcher");
+                let entry = format!("{ip} {portal}  # Дримворлд Навсегда");
                 lines.push(&entry);
                 if std::fs::write(HOSTS, lines.join("\r\n") + "\r\n").is_err() {
                     code = 3;
@@ -185,7 +185,7 @@ mod imp {
     const HOSTS_SCRIPT: &str = r#"set -e
 t=$(mktemp)
 awk -v h="$2" '{ line=$0; sub(/#.*/, "", line); n=split(line, f, /[ \t]+/); keep=1; for (i=2; i<=n; i++) if (f[i]==h) keep=0; if (keep) print $0 }' /etc/hosts > "$t"
-printf '%s %s  # Forever AI Launcher\n' "$1" "$2" >> "$t"
+printf '%s %s  # Дримворлд Навсегда\n' "$1" "$2" >> "$t"
 cat "$t" > /etc/hosts
 rm -f "$t"
 dscacheutil -flushcache
@@ -451,7 +451,7 @@ mod imp {
             let script = r#"set -e
 t=$(mktemp)
 awk -v h="$2" '{ line=$0; sub(/#.*/, "", line); n=split(line, f, /[ \t]+/); keep=1; for (i=2; i<=n; i++) if (f[i]==h) keep=0; if (keep) print $0 }' /etc/hosts > "$t"
-printf '%s %s  # Forever AI Launcher\n' "$1" "$2" >> "$t"
+printf '%s %s  # Дримворлд Навсегда\n' "$1" "$2" >> "$t"
 cat "$t" > /etc/hosts
 rm -f "$t""#;
             match clean_env(&mut Command::new("pkexec")).args(["sh", "-c", script, "sh", &ip.to_string(), portal]).status() {
