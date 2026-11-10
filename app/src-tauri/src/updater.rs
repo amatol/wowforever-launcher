@@ -4,6 +4,7 @@ use crate::config::Settings;
 use futures_util::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -20,6 +21,17 @@ pub struct ManifestFile {
     /// Сверять SHA-256 локального файла, а не только размер.
     #[serde(default)]
     pub verify_sha256: bool,
+    /// Проверять файл при быстром обновлении. false — только наличие:
+    /// клиент сам переписывает индексы CASC, их размер и SHA нестабильны.
+    #[serde(default = "default_true")]
+    pub quick_check: bool,
+    /// Проверять файл при полной проверке SHA-256.
+    #[serde(default = "default_true")]
+    pub full_check: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -161,6 +173,16 @@ fn file_matches(path: &Path, size: u64, expected_sha: &str, verify_sha256: bool)
     hex::encode(hasher.finalize()) == expected_sha
 }
 
+/// Проверяет файл по политике манифеста: для клиентских файлов CASC
+/// достаточно наличия, для остальных — размер, а в полном режиме SHA-256.
+fn file_is_current(path: &Path, file: &ManifestFile, full: bool) -> bool {
+    let enabled = if full { file.full_check } else { file.quick_check };
+    if !enabled {
+        return path.is_file();
+    }
+    file_matches(path, file.size, &file.sha256, full || file.verify_sha256)
+}
+
 pub async fn client_status(settings: &Settings) -> Result<ClientStatus, String> {
     let manifest = fetch_client_manifest(settings).await?;
     let root = client_root(settings)?;
@@ -171,7 +193,7 @@ pub async fn client_status(settings: &Settings) -> Result<ClientStatus, String> 
     let mut changed_bytes = 0u64;
     for file in &manifest.files {
         let path = root.join(safe_relative(&file.path)?);
-        if !file_matches(&path, file.size, &file.sha256, file.verify_sha256) {
+        if !file_is_current(&path, file, false) {
             changed_files += 1;
             changed_bytes = changed_bytes.saturating_add(file.size);
         }
@@ -246,7 +268,7 @@ async fn update_client_inner(
     for (index, file) in manifest.files.iter().enumerate() {
         let relative = safe_relative(&file.path)?;
         let path = root.join(&relative);
-        let matches = if full {
+        let matches = if full && file.full_check {
             let path = path.clone();
             let size = file.size;
             let sha = file.sha256.clone();
@@ -254,7 +276,7 @@ async fn update_client_inner(
                 .await
                 .unwrap_or(false)
         } else {
-            file_matches(&path, file.size, &file.sha256, file.verify_sha256)
+            file_is_current(&path, file, full)
         };
         if !matches {
             entries.push(DownloadEntry {
@@ -298,6 +320,22 @@ async fn update_client_inner(
                 size: file.size,
                 sha256: file.sha256.clone(),
             });
+        }
+    }
+    // Если повреждён хотя бы один архив Data, обновляем весь Data целиком:
+    // архивы и индексы CASC должны быть из одного набора, иначе клиент
+    // может получить несогласованную раскладку.
+    if full && entries.iter().any(|entry| entry.path.starts_with("Data/")) {
+        let mut present: HashSet<String> = entries.iter().map(|entry| entry.path.clone()).collect();
+        for file in &manifest.files {
+            if file.path.starts_with("Data/") && present.insert(file.path.clone()) {
+                entries.push(DownloadEntry {
+                    path: file.path.clone(),
+                    url: file.http_url.clone(),
+                    size: file.size,
+                    sha256: file.sha256.clone(),
+                });
+            }
         }
     }
     let has_stale = manifest
@@ -359,7 +397,7 @@ pub async fn install_client(
     for file in &manifest.files {
         let relative = safe_relative(&file.path)?;
         let path = root.join(&relative);
-        if !file_matches(&path, file.size, &file.sha256, file.verify_sha256) {
+        if !file_is_current(&path, file, false) {
             entries.push(DownloadEntry {
                 path: file.path.clone(),
                 url: file.http_url.clone(),
@@ -577,4 +615,58 @@ async fn download_entries(
         return Err(error);
     }
     Ok(())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn manifest_file(path: &str, size: u64, sha256: &str) -> ManifestFile {
+        ManifestFile {
+            path: path.into(),
+            size,
+            sha256: sha256.into(),
+            http_url: String::new(),
+            verify_sha256: false,
+            quick_check: true,
+            full_check: true,
+        }
+    }
+
+    fn temp_file(contents: &[u8]) -> PathBuf {
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("forever-launcher-test-{unique}"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[test]
+    fn client_managed_file_only_needs_to_exist() {
+        let path = temp_file(b"client-managed");
+        let mut file = manifest_file("Data/data/000000000e.idx", 999, "wrong");
+        file.quick_check = false;
+        file.full_check = false;
+
+        assert!(file_is_current(&path, &file, false));
+        assert!(file_is_current(&path, &file, true));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn regular_file_is_checked_by_size_and_optional_sha() {
+        let path = temp_file(b"hello");
+        let mut file = manifest_file("_forever_/Wow.exe", 5, "wrong");
+        assert!(file_is_current(&path, &file, false));
+
+        file.size = 4;
+        assert!(!file_is_current(&path, &file, false));
+
+        file.size = 5;
+        file.verify_sha256 = true;
+        assert!(!file_is_current(&path, &file, false));
+        std::fs::remove_file(path).unwrap();
+    }
 }
