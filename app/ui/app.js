@@ -78,6 +78,74 @@ async function refreshClientStatus() {
   }
 }
 
+async function refreshLauncherUpdate() {
+  try {
+    launcherUpdate = await invoke('launcher_update_status');
+  } catch (e) {
+    console.debug('launcher update:', e);
+    $('launcher-update').hidden = true;
+    return;
+  }
+  if (!launcherUpdate.available || !launcherUpdate.supported) {
+    $('launcher-update').hidden = true;
+    return;
+  }
+  $('launcher-update-detail').textContent = t('launcherUpdateDetail', {
+    version: launcherUpdate.version,
+    size: formatBytes(launcherUpdate.size),
+  });
+  $('launcher-update-btn').disabled = false;
+  $('launcher-update-btn').textContent = t('launcherUpdateButton');
+  $('launcher-update').hidden = false;
+}
+
+function handleLauncherUpdateEvent(payload) {
+  if (payload.kind === 'start') {
+    $('launcher-update-detail').textContent = t('launcherUpdateDownloading');
+    return;
+  }
+  if (payload.kind === 'progress') {
+    const percent = Math.max(0, Math.min(100, Number(payload.percent) || 0));
+    $('launcher-update-detail').textContent = t('launcherUpdateProgress', { percent: percent.toFixed(0) });
+    return;
+  }
+  if (payload.kind === 'done') {
+    $('launcher-update-detail').textContent = t('launcherUpdateDone');
+    return;
+  }
+  if (payload.kind === 'error') {
+    const message = t('launcherUpdateError', { e: payload.message });
+    $('launcher-update-detail').textContent = message;
+    toast(message);
+    launcherUpdating = false;
+    updatePlayButton();
+    $('launcher-update-btn').disabled = false;
+    $('launcher-update-btn').textContent = t('launcherUpdateButton');
+  }
+}
+
+async function installLauncherUpdate() {
+  if (launcherUpdating || !launcherUpdate) return;
+  launcherUpdating = true;
+  updatePlayButton();
+  const btn = $('launcher-update-btn');
+  btn.disabled = true;
+  btn.textContent = t('working');
+  $('launcher-update-detail').textContent = t('launcherUpdateDownloading');
+  try {
+    await invoke('install_launcher_update');
+  } catch (e) {
+    const message = t('launcherUpdateError', { e });
+    $('launcher-update-detail').textContent = message;
+    toast(message);
+  } finally {
+    launcherUpdating = false;
+    updatePlayButton();
+    btn.disabled = false;
+    btn.textContent = t('launcherUpdateButton');
+  }
+}
+
 function handleUpdateEvent(payload) {
   const progressKey = 'clientProgress';
   const startKey = 'clientStarting';
