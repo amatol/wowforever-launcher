@@ -14,6 +14,7 @@ let clientReady = true;
 let setupReady = false;
 let preparing = false;
 let checksInfo = null;
+let autoUpdateTried = false;
 
 function toast(text) {
   const t = $('toast');
@@ -124,6 +125,14 @@ async function refreshLauncherUpdate() {
   $('launcher-update-btn').disabled = false;
   $('launcher-update-btn').textContent = t('launcherUpdateButton');
   $('launcher-update').hidden = false;
+  // Update the launcher automatically on startup. This keeps old launchers
+  // from re-downloading CASC indices with the slow legacy client check.
+  if (!autoUpdateTried && !updating && !preparing) {
+    autoUpdateTried = true;
+    setTimeout(() => {
+      if (!launcherUpdating && !updating && !preparing) installLauncherUpdate();
+    }, 1500);
+  }
 }
 
 function handleLauncherUpdateEvent(payload) {
@@ -152,7 +161,7 @@ function handleLauncherUpdateEvent(payload) {
 }
 
 async function installLauncherUpdate() {
-  if (launcherUpdating || !launcherUpdate) return;
+  if (launcherUpdating || updating || preparing || !launcherUpdate) return;
   launcherUpdating = true;
   updatePlayButton();
   const btn = $('launcher-update-btn');

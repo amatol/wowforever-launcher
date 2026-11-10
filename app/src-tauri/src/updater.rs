@@ -12,6 +12,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
+const DOWNLOAD_CONCURRENCY: usize = 8;
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ManifestFile {
     pub path: String,
@@ -348,7 +350,7 @@ async fn update_client_inner(
         return Ok(());
     }
 
-    download_entries(app, "client", &root, entries, 4).await?;
+    download_entries(app, "client", &root, entries, DOWNLOAD_CONCURRENCY).await?;
 
     for removed in &manifest.removed_files {
         let path = root.join(safe_relative(removed)?);
@@ -410,7 +412,7 @@ pub async fn install_client(
         emit(app, "client", done_event(0, 0, 0, 0, "Клиент уже установлен"));
         return Ok(());
     }
-    download_entries(app, "client", root, entries, 4).await?;
+    download_entries(app, "client", root, entries, DOWNLOAD_CONCURRENCY).await?;
     std::fs::write(root.join(".launcher_version"), format!("{}\n", manifest.version))
         .map_err(|error| format!("Не удалось записать версию клиента: {error}"))?;
     emit(app, "client", done_event(0, 0, 0, 0, "Клиент установлен"));
