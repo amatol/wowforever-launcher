@@ -10,7 +10,6 @@ let clientStatus = null;
 let updating = false;
 let launcherUpdate = null;
 let launcherUpdating = false;
-let setupReady = false;
 let clientReady = true;
 
 function toast(text) {
@@ -208,7 +207,6 @@ async function installClient() {
     await refresh();
     $('s-game-dir').value = state.settings.gameDir;
     gameDirState();
-    refreshChecks();
     refreshClientStatus();
     toast(t('clientDone'));
   } catch (e) {
@@ -280,11 +278,7 @@ function updatePlayButton() {
         : !clientReady
           ? t('playUpdate')
           : t('play');
-  play.disabled =
-    state.playing ||
-    updating ||
-    launcherUpdating ||
-    (hasClient && clientReady && !setupReady);
+  play.disabled = state.playing || updating || launcherUpdating;
   play.classList.toggle('running', state.playing);
   if (!hasClient && !state.playing && !updating) setStep(t('clientNotInstalled'), '');
   else if (hasClient && !clientReady && !updating) setStep(t('clientUpdateShort'), '');
@@ -303,49 +297,6 @@ async function refreshStatus() {
   }
 }
 
-async function refreshChecks() {
-  try {
-    const c = await invoke('checks');
-    showCheck('check-hosts', c.hosts, c.hostsDetail);
-    showCheck('check-cert', c.certificate, c.certificateDetail);
-    // on Linux the prefix certificate is installed automatically at launch: only the hosts entry needs the user
-    const needsCert = state.platform !== 'linux' && !c.certificate;
-    const blocking = !c.hosts || needsCert;
-    setupReady = !blocking;
-    updatePlayButton();
-    $('setup-notice').hidden = !blocking;
-    $('setup-detail').textContent = [!c.hosts && c.hostsDetail, needsCert && c.certificateDetail]
-      .filter(Boolean).join(' · ');
-    return c;
-  } catch (e) {
-    log(t('checks', { e }));
-  }
-}
-
-function showCheck(id, ok, detail) {
-  const el = $(id);
-  el.dataset.ok = String(ok);
-  el.querySelector('p').textContent = detail;
-}
-
-async function repair(btn) {
-  btn.disabled = true;
-  const label = btn.textContent;
-  btn.textContent = t('working');
-  try {
-    const c = await invoke('repair');
-    showCheck('check-hosts', c.hosts, c.hostsDetail);
-    showCheck('check-cert', c.certificate, c.certificateDetail);
-    toast(c.hosts ? t('pcReady') : t('partialRepair'));
-  } catch (e) {
-    toast(t('failed', { e }));
-  } finally {
-    btn.disabled = false;
-    btn.textContent = label;
-    refreshChecks();
-  }
-}
-
 // ------------------------------------------------------------------------------------------------ login
 $('login-form').addEventListener('submit', async (ev) => {
   ev.preventDefault();
@@ -358,7 +309,6 @@ $('login-form').addEventListener('submit', async (ev) => {
     await invoke('login', { email: $('email').value, password: $('password').value });
     $('password').value = '';
     await refresh();
-    refreshChecks();
   } catch (e) {
     err.textContent = String(e);
     err.hidden = false;
@@ -404,13 +354,11 @@ $('play').addEventListener('click', async () => {
   }
 });
 
-$('setup-fix').addEventListener('click', (ev) => repair(ev.currentTarget));
 $('toggle-log').addEventListener('click', (ev) => {
   ev.preventDefault();
   $('log-box').hidden = !$('log-box').hidden;
 });
 $('close-log').addEventListener('click', () => ($('log-box').hidden = true));
-$('repair').addEventListener('click', (ev) => repair(ev.currentTarget));
 
 listen('game', ({ payload }) => {
   const { kind, message } = payload;
@@ -475,7 +423,6 @@ function openSettings() {
   refreshClientStatus();
   $('settings').hidden = false;
   $('scrim').hidden = false;
-  refreshChecks();
 }
 
 function closeSettings() {
@@ -530,7 +477,6 @@ $('save-settings').addEventListener('click', async () => {
     closeSettings();
     await refresh();
     refreshStatus();
-    refreshChecks();
     refreshNews();
     refreshLauncherUpdate();
     toast(t('saved'));
@@ -610,6 +556,5 @@ rotateBackground();
   refreshStatus();
   refreshNews();
   refreshLauncherUpdate();
-  if (state.email) refreshChecks();
   setInterval(refreshStatus, 20000);
 })();
