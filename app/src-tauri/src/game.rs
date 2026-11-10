@@ -14,7 +14,12 @@ const LAUNCH_OPTIONS: &str = r"Software\Blizzard Entertainment\Battle.net\Launch
 /// Update portal/locale in both the client's Config.wtf and the custom
 /// ForeverLauncher.wtf. The client reads Config.wtf for CVars even when
 /// `-config ForeverLauncher.wtf` is passed, so both must agree.
-fn rewrite_config(path: &Path, fallback: &str, wanted: &[(&str, String)]) -> Result<(), String> {
+fn rewrite_config(
+    path: &Path,
+    fallback: &str,
+    wanted: &[(&str, String)],
+    defaults: &[(&str, &str)],
+) -> Result<(), String> {
     let text = std::fs::read_to_string(path).unwrap_or_else(|_| fallback.to_string());
     let mut lines: Vec<String> = text
         .lines()
@@ -23,6 +28,13 @@ fn rewrite_config(path: &Path, fallback: &str, wanted: &[(&str, String)]) -> Res
         .collect();
     for (key, value) in wanted {
         lines.push(format!("SET {key} \"{value}\""));
+    }
+    // Только для отсутствующих ключей: не перетираем настройки графики,
+    // которые игрок выбрал в самой игре.
+    for (key, value) in defaults {
+        if !lines.iter().any(|line| line.starts_with(&format!("SET {key} "))) {
+            lines.push(format!("SET {key} \"{value}\""));
+        }
     }
     std::fs::write(path, lines.join("\r\n") + "\r\n")
         .map_err(|error| format!("{} : {error}", path.display()))
@@ -45,8 +57,16 @@ pub fn write_wtf(settings: &Settings) -> Result<(), String> {
         ("textLocale", settings.locale.clone()),
         ("audioLocale", settings.locale.clone()),
     ];
-    rewrite_config(&custom, &custom_text, &wanted)?;
-    rewrite_config(&config, &config_text, &wanted)?;
+    let defaults = [
+        ("gxApi", "D3D11"),
+        ("gxWindow", "1"),
+        ("gxMaximize", "0"),
+        ("gxResolution", "1280x720"),
+        ("gxRefresh", "60"),
+        ("vsync", "0"),
+    ];
+    rewrite_config(&custom, &custom_text, &wanted, &defaults)?;
+    rewrite_config(&config, &config_text, &wanted, &defaults)?;
     Ok(())
 }
 

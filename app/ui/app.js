@@ -278,6 +278,15 @@ function setLanguage(setting) {
   invoke('set_language', { language: code });
 }
 
+async function prepareClientConfig() {
+  if (!state || !state.gameFound || state.playing || updating || launcherUpdating) return;
+  try {
+    await invoke('prepare_client_config');
+  } catch (e) {
+    console.debug('prepare client config:', e);
+  }
+}
+
 async function refresh() {
   state = await invoke('get_state');
   setLanguage(state.settings.language);
@@ -294,6 +303,7 @@ async function refresh() {
     $('avatar').textContent = state.email[0].toUpperCase();
   }
   updatePlayButton();
+  if (state.gameFound) prepareClientConfig();
   refreshClientStatus();
 }
 
@@ -585,4 +595,5 @@ rotateBackground();
   refreshNews();
   refreshLauncherUpdate();
   setInterval(refreshStatus, 20000);
+  setInterval(prepareClientConfig, 60000);
 })();
