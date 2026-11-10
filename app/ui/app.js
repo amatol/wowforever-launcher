@@ -198,6 +198,35 @@ function handleUpdateEvent(payload, prefix) {
   }
 }
 
+async function installClient() {
+  if (updating) return;
+  const selected = $('s-game-dir').value.trim();
+  if (!selected) {
+    toast(t('chooseGameDir'));
+    return;
+  }
+  updating = true;
+  updatePlayButton();
+  $('update-progress').hidden = false;
+  $('update-bar').style.width = '0%';
+  $('update-detail').textContent = t('clientStarting');
+  try {
+    await invoke('install_client', { path: selected });
+    await refresh();
+    $('s-game-dir').value = state.settings.gameDir;
+    gameDirState();
+    refreshChecks();
+    refreshClientStatus();
+    toast(t('clientDone'));
+  } catch (e) {
+    $('update-detail').textContent = t('updateError', { e });
+    toast(t('updateError', { e }));
+  } finally {
+    updating = false;
+    updatePlayButton();
+  }
+}
+
 async function runUpdate(prefix, command, startKey) {
   if (updating) return;
   updating = true;
@@ -243,6 +272,7 @@ async function refresh() {
     $('avatar').textContent = state.email[0].toUpperCase();
   }
   updatePlayButton();
+  $('download-client-box').hidden = state.gameFound;
   refreshClientStatus();
 }
 
@@ -468,6 +498,7 @@ $('check-client').addEventListener('click', async () => {
   await refreshClientStatus();
   if (clientStatus && clientStatus.upToDate) toast(t('clientUpToDate'));
 });
+$('download-client').addEventListener('click', installClient);
 $('update-client').addEventListener('click', () => runUpdate('client', 'update_client', 'clientStarting'));
 $('update-addons').addEventListener('click', () => runUpdate('addons', 'update_addons', 'addonsStarting'));
 $('launcher-update-btn').addEventListener('click', installLauncherUpdate);

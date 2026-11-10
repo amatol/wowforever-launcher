@@ -17,6 +17,7 @@ mod updater;
 use config::{Session, Settings};
 use i18n::{t, tf};
 use serde::Serialize;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 #[cfg(not(target_os = "macos"))]
@@ -181,6 +182,28 @@ async fn update_addons(app: AppHandle, state: State<'_, AppState>) -> Result<(),
     }
     let settings = state.settings.lock().unwrap().clone();
     updater::update_addons(&app, &settings).await
+}
+
+#[tauri::command]
+async fn install_client(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<(), String> {
+    if state.playing.load(Ordering::SeqCst) {
+        return Err("Нельзя устанавливать клиент во время игры".into());
+    }
+    let settings = state.settings.lock().unwrap().clone();
+    let root = updater::normalize_install_root(Path::new(&path))?;
+    updater::install_client(&app, &settings, &root).await?;
+    let game_dir = root.join("_forever_");
+    if !game_dir.join("Wow.exe").is_file() {
+        return Err("После установки не найден _forever_/Wow.exe".into());
+    }
+    let mut current = state.settings.lock().unwrap();
+    current.game_dir = game_dir.to_string_lossy().into_owned();
+    current.save().map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -365,7 +388,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(AppState { settings: Mutex::new(Settings::load()), playing: AtomicBool::new(false) })
         .invoke_handler(tauri::generate_handler![
-            get_state, save_settings, set_language, detect_locale, login, logout, server_status, news, client_status, update_client, addons_status, update_addons, launcher_update_status, install_launcher_update, checks, repair, play
+            get_state, save_settings, set_language, detect_locale, login, logout, server_status, news, client_status, update_client, addons_status, update_addons, install_client, launcher_update_status, install_launcher_update, checks, repair, play
         ])
         .run(tauri::generate_context!())
         .expect("error while running Forever Launcher");

@@ -298,6 +298,61 @@ pub async fn update_client(app: &AppHandle, settings: &Settings) -> Result<(), S
     Ok(())
 }
 
+/// Корень клиента для установки: если выбрали саму папку `_forever_`,
+/// устанавливаем в её родителя (там лежат Data и .build.info).
+pub fn normalize_install_root(path: &Path) -> Result<PathBuf, String> {
+    if path.as_os_str().is_empty() {
+        return Err("Папка установки не выбрана".into());
+    }
+    let mut root = path.to_path_buf();
+    let is_forever = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.eq_ignore_ascii_case("_forever_"))
+        .unwrap_or(false);
+    if is_forever {
+        root = root
+            .parent()
+            .ok_or_else(|| "Не удалось определить папку установки".to_string())?
+            .to_path_buf();
+    }
+    Ok(root)
+}
+
+/// Полная установка/докачка клиента в выбранный корень.
+/// Скачивает все отсутствующие или не совпавшие по SHA-256 файлы.
+pub async fn install_client(
+    app: &AppHandle,
+    settings: &Settings,
+    root: &Path,
+) -> Result<(), String> {
+    let manifest = fetch_client_manifest(settings).await?;
+    std::fs::create_dir_all(root)
+        .map_err(|error| format!("Не удалось создать папку {}: {error}", root.display()))?;
+    let mut entries = Vec::new();
+    for file in &manifest.files {
+        let relative = safe_relative(&file.path)?;
+        let path = root.join(&relative);
+        if !file_matches(&path, file.size, &file.sha256, file.verify_sha256) {
+            entries.push(DownloadEntry {
+                path: file.path.clone(),
+                url: file.http_url.clone(),
+                size: file.size,
+                sha256: file.sha256.clone(),
+            });
+        }
+    }
+    if entries.is_empty() {
+        emit(app, "client", done_event(0, 0, 0, 0, "Клиент уже установлен"));
+        return Ok(());
+    }
+    download_entries(app, "client", root, entries, 4).await?;
+    std::fs::write(root.join(".launcher_version"), format!("{}\n", manifest.version))
+        .map_err(|error| format!("Не удалось записать версию клиента: {error}"))?;
+    emit(app, "client", done_event(0, 0, 0, 0, "Клиент установлен"));
+    Ok(())
+}
+
 pub async fn addons_status(settings: &Settings) -> Result<AddonsStatus, String> {
     let manifest = fetch_addons_manifest(settings).await?;
     let root = addons_root(settings)?;

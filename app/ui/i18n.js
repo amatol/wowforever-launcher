@@ -318,6 +318,8 @@ Object.assign(TEXTS.ru, {
   addonsDone: 'Аддоны обновлены',
   updateError: 'Ошибка обновления: {e}',
   clientNotice: 'Клиент не обновлён. Откройте настройки и нажмите «Обновить клиент».',
+  downloadClient: 'Скачать клиент',
+  downloadClientHint: 'Выберите пустую папку для установки клиента — будет скачано около 54 ГБ.',
 });
 Object.assign(TEXTS.en, {
   updatesTitle: 'Updates',
@@ -336,6 +338,8 @@ Object.assign(TEXTS.en, {
   addonsDone: 'Addons updated',
   updateError: 'Update error: {e}',
   clientNotice: 'The client is not up to date. Open Settings and click “Update client”.',
+  downloadClient: 'Download client',
+  downloadClientHint: 'Choose an empty folder for the client — about 54 GB will be downloaded.',
 });
 
 // Самообновление лаунчера.
