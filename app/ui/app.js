@@ -113,8 +113,11 @@ function handleUpdateEvent(payload) {
     return;
   }
   if (payload.kind === 'error') {
-    $('update-detail').textContent = t('updateError', { e: payload.message });
-    toast(t('updateError', { e: payload.message }));
+    const message = t('updateError', { e: payload.message });
+    $('update-detail').textContent = message;
+    $('client-notice').textContent = message;
+    $('client-notice').hidden = false;
+    toast(message);
     updating = false;
     updatePlayButton();
   }
@@ -174,6 +177,7 @@ function setLanguage(setting) {
   const code = resolveLanguage(setting);
   if (code === lang && document.documentElement.lang === code) return;
   applyLanguage(code);
+  if (state) updatePlayButton();
   invoke('set_language', { language: code });
 }
 
@@ -216,7 +220,7 @@ function updatePlayButton() {
   play.classList.toggle('running', state.playing);
   if (!hasClient && !state.playing && !updating) setStep(t('clientNotInstalled'), '');
   else if (hasClient && !clientReady && !updating) setStep(t('clientUpdateShort'), '');
-  else if (hasClient && clientReady && setupReady && !state.playing && !updating) setStep('', '');
+  else if (hasClient && clientReady && !state.playing && !updating) setStep('', '');
 }
 
 async function refreshStatus() {
