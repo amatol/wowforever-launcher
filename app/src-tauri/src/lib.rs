@@ -18,7 +18,7 @@ use config::{Session, Settings};
 use i18n::{t, tf};
 use serde::Serialize;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 #[cfg(not(target_os = "macos"))]
 use std::time::Duration;
@@ -26,6 +26,13 @@ use tauri::{AppHandle, Emitter, State};
 
 #[cfg(windows)]
 pub use system::{admin_remove, admin_setup};
+
+static AUTOPLAY: AtomicBool = AtomicBool::new(false);
+static QUIT_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+pub fn set_autoplay(value: bool) {
+    AUTOPLAY.store(value, Ordering::SeqCst);
+}
 
 struct AppState {
     settings: Mutex<Settings>,
@@ -44,6 +51,7 @@ struct Snapshot {
     game_found: bool,
     game_version: Option<String>,
     playing: bool,
+    autoplay: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -80,6 +88,7 @@ fn get_state(state: State<AppState>) -> Snapshot {
         locales: config::LOCALES,
         runners: runners(),
         playing: state.playing.load(Ordering::SeqCst),
+        autoplay: AUTOPLAY.load(Ordering::SeqCst),
         settings,
     }
 }
@@ -278,6 +287,39 @@ async fn remove_patch(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn hide_launcher(window: tauri::Window) {
+    let _ = window.hide();
+}
+
+#[tauri::command]
+fn show_launcher(window: tauri::Window) {
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
+#[tauri::command]
+fn quit_launcher(app: AppHandle) {
+    app.exit(0);
+}
+
+/// Exits the launcher after `seconds`, unless cancelled by `cancel_quit`.
+#[tauri::command]
+fn schedule_quit(app: AppHandle, seconds: u64) {
+    let generation = QUIT_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(seconds));
+        if QUIT_GENERATION.load(Ordering::SeqCst) == generation {
+            app.exit(0);
+        }
+    });
+}
+
+#[tauri::command]
+fn cancel_quit() {
+    QUIT_GENERATION.fetch_add(1, Ordering::SeqCst);
+}
+
+#[tauri::command]
 async fn play(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     if state.playing.swap(true, Ordering::SeqCst) {
         return Err(t("already_running").into());
@@ -426,7 +468,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(AppState { settings: Mutex::new(Settings::load()), playing: AtomicBool::new(false) })
         .invoke_handler(tauri::generate_handler![
-            get_state, save_settings, set_language, detect_locale, login, logout, server_status, news, prepare_client_config, client_status, update_client, verify_client, install_client, launcher_update_status, install_launcher_update, checks, repair, remove_patch, refresh_session, play
+            get_state, save_settings, set_language, detect_locale, login, logout, server_status, news, prepare_client_config, client_status, update_client, verify_client, install_client, launcher_update_status, install_launcher_update, checks, repair, remove_patch, refresh_session, hide_launcher, show_launcher, quit_launcher, schedule_quit, cancel_quit, play
         ])
         .run(tauri::generate_context!())
         .expect("error while running Дримворлд Навсегда");

@@ -267,7 +267,11 @@ move /Y "%FOREVER_OLD%" "%FOREVER_OLD%.old" >nul
 if errorlevel 1 goto fail
 move /Y "%FOREVER_NEW%" "%FOREVER_OLD%" >nul
 if errorlevel 1 goto fail
-start "" "%FOREVER_OLD%"
+if "%FOREVER_RESTART_PLAY%"=="1" (
+  start "" "%FOREVER_OLD%" --play
+) else (
+  start "" "%FOREVER_OLD%"
+)
 del "%~f0" >nul
 exit /b 0
 :fail
@@ -277,12 +281,14 @@ exit /b 1
     std::fs::write(&script, body.replace('\n', "\r\n"))
         .map_err(|error| format!("Не удалось создать helper обновления: {error}"))?;
 
+    let restart_play = std::env::args().any(|arg| arg == "--play");
     std::process::Command::new("cmd")
         .arg("/C")
         .arg(&script)
         .env("FOREVER_PID", std::process::id().to_string())
         .env("FOREVER_OLD", current)
         .env("FOREVER_NEW", new)
+        .env("FOREVER_RESTART_PLAY", if restart_play { "1" } else { "0" })
         .creation_flags(0x08000000) // CREATE_NO_WINDOW
         .stdin(Stdio::null())
         .stdout(Stdio::null())

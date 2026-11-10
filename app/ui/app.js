@@ -15,6 +15,8 @@ let setupReady = false;
 let preparing = false;
 let checksInfo = null;
 let autoUpdateTried = false;
+let autoPlayActive = false;
+let autoPlayStarted = false;
 
 function toast(text) {
   const t = $('toast');
@@ -46,6 +48,100 @@ function formatBytes(bytes) {
     index += 1;
   }
   return `${value.toFixed(index === 0 || value >= 10 ? 0 : 1)} ${units[index]}`;
+}
+
+function autoShow(text) {
+  autoPlayActive = true;
+  document.body.classList.add('autoplay-mode');
+  $('autoplay').hidden = false;
+  $('auto-progress').hidden = true;
+  $('auto-bar').style.width = '0%';
+  autoDetail(text);
+}
+
+function autoDetail(text) {
+  if (autoPlayActive) $('auto-detail').textContent = text;
+}
+
+function autoProgress(percent) {
+  if (!autoPlayActive) return;
+  $('auto-progress').hidden = false;
+  $('auto-bar').style.width = `${Math.max(0, Math.min(100, Number(percent) || 0))}%`;
+}
+
+function autoStop(showWindow = true) {
+  autoPlayActive = false;
+  invoke('cancel_quit').catch(() => {});
+  $('autoplay').hidden = true;
+  $('auto-progress').hidden = true;
+  $('auto-bar').style.width = '0%';
+  document.body.classList.remove('autoplay-mode');
+  if (showWindow) invoke('show_launcher').catch(() => {});
+}
+
+async function maybeAutoPlay() {
+  if (autoPlayStarted) return;
+  autoPlayStarted = true;
+  if (!state.autoplay || !state.email) return;
+
+  autoShow(t('autoStarting'));
+
+  // 1. Launcher update first. The helper restarts it with --play preserved.
+  try {
+    launcherUpdate = await invoke('launcher_update_status');
+  } catch (e) {
+    console.debug('launcher update:', e);
+  }
+  if (launcherUpdate && launcherUpdate.available && launcherUpdate.supported) {
+    autoDetail(t('autoLauncherUpdate'));
+    installLauncherUpdate();
+    return;
+  }
+
+  try {
+    // 2. Saved session: launcher/login also extends the 30-day token.
+    const email = await invoke('refresh_session');
+    if (!email) {
+      autoStop();
+      toast(t('sessionExpired'));
+      await refresh();
+      return;
+    }
+
+    // 3. hosts + CA. With --play it is acceptable to ask for one UAC prompt.
+    const checks = await invoke('checks');
+    if (!checks.hosts || !checks.certificate) {
+      autoDetail(t('autoPreparing'));
+      const repaired = await invoke('repair');
+      if (!repaired.hosts || !repaired.certificate) throw new Error(t('setupNeeded'));
+    }
+
+    // 4. Client update with the centered progress bar.
+    autoDetail(t('autoCheckingClient'));
+    let status = await invoke('client_status');
+    if (!status.upToDate) {
+      autoProgress(0);
+      autoDetail(t('autoUpdatingClient'));
+      await invoke('update_client');
+      status = await invoke('client_status');
+      if (!status.upToDate) throw new Error(t('autoUpdateFailed'));
+    }
+
+    // 5. Launch and hide the launcher; the Rust process stays for the key patch.
+    autoDetail(t('autoLaunching'));
+    await invoke('play');
+    autoDetail(t('autoRunning'));
+    setTimeout(() => {
+      if (autoPlayActive) invoke('hide_launcher').catch(() => {});
+    }, 2500);
+
+    // 6. Exit 60 seconds after the game was started (Rust timer survives a hidden window).
+    invoke('schedule_quit', { seconds: 60 }).catch(() => {});
+  } catch (e) {
+    autoStop();
+    toast(t('autoFailed', { e }));
+    await refresh();
+  }
 }
 
 async function refreshSetupChecks() {
@@ -138,21 +234,28 @@ async function refreshLauncherUpdate() {
 function handleLauncherUpdateEvent(payload) {
   if (payload.kind === 'start') {
     $('launcher-update-detail').textContent = t('launcherUpdateDownloading');
+    if (autoPlayActive) {
+      autoProgress(0);
+      autoDetail(t('launcherUpdateDownloading'));
+    }
     return;
   }
   if (payload.kind === 'progress') {
     const percent = Math.max(0, Math.min(100, Number(payload.percent) || 0));
     $('launcher-update-detail').textContent = t('launcherUpdateProgress', { percent: percent.toFixed(0) });
+    if (autoPlayActive) autoProgress(percent);
     return;
   }
   if (payload.kind === 'done') {
     $('launcher-update-detail').textContent = t('launcherUpdateDone');
+    if (autoPlayActive) autoProgress(100);
     return;
   }
   if (payload.kind === 'error') {
     const message = t('launcherUpdateError', { e: payload.message });
     $('launcher-update-detail').textContent = message;
     toast(message);
+    if (autoPlayActive) autoStop();
     launcherUpdating = false;
     updatePlayButton();
     $('launcher-update-btn').disabled = false;
@@ -192,6 +295,7 @@ function handleUpdateEvent(payload) {
     $('update-detail').textContent = t(startKey);
     $('client-notice').textContent = t(startKey);
     $('client-notice').hidden = false;
+    if (autoPlayActive) autoDetail(t(startKey));
     return;
   }
   if (payload.kind === 'verify') {
@@ -202,6 +306,7 @@ function handleUpdateEvent(payload) {
     $('update-detail').textContent = detail;
     $('client-notice').textContent = detail;
     $('client-notice').hidden = false;
+    if (autoPlayActive) autoProgress(percent);
     return;
   }
   if (payload.kind === 'progress') {
@@ -213,6 +318,7 @@ function handleUpdateEvent(payload) {
     $('update-detail').textContent = detail;
     $('client-notice').textContent = detail;
     $('client-notice').hidden = false;
+    if (autoPlayActive) autoProgress(percent);
     return;
   }
   if (payload.kind === 'done') {
@@ -224,6 +330,10 @@ function handleUpdateEvent(payload) {
     updating = false;
     updatePlayButton();
     refreshClientStatus();
+    if (autoPlayActive) {
+      autoProgress(100);
+      autoDetail(t(doneKey));
+    }
     return;
   }
   if (payload.kind === 'error') {
@@ -234,6 +344,7 @@ function handleUpdateEvent(payload) {
     toast(message);
     updating = false;
     updatePlayButton();
+    if (autoPlayActive) autoDetail(message);
   }
 }
 
@@ -379,17 +490,20 @@ async function refresh() {
 
   // 30-day token: bnetserver extends it on every successful launcher/login.
   // Do it in the background so a slow/offline server does not block the UI.
-  const current = state;
-  invoke('refresh_session').then((email) => {
-    if (state !== current) return;
-    if (email === null && state.email) {
-      state.email = null;
-      applyState();
-    } else if (email && email !== state.email) {
-      state.email = email;
-      applyState();
-    }
-  }).catch((e) => console.debug('session:', e));
+  // In --play mode the startup flow validates the session explicitly.
+  if (!state.autoplay) {
+    const current = state;
+    invoke('refresh_session').then((email) => {
+      if (state !== current) return;
+      if (email === null && state.email) {
+        state.email = null;
+        applyState();
+      } else if (email && email !== state.email) {
+        state.email = email;
+        applyState();
+      }
+    }).catch((e) => console.debug('session:', e));
+  }
 }
 
 function updatePlayButton() {
@@ -504,6 +618,14 @@ listen('game', ({ payload }) => {
   if (kind === 'step' || kind === 'running') setStep(message);
   if (kind === 'ready') setStep(message, 'ok');
   if (kind === 'error') setStep(message, 'err');
+  if (kind === 'closed' && autoPlayActive) {
+    invoke('quit_launcher').catch(() => {});
+    return;
+  }
+  if (kind === 'error' && autoPlayActive) {
+    autoStop();
+    toast(t('autoFailed', { e: message }));
+  }
   if (kind === 'closed' || kind === 'error') {
     state.playing = false;
     updatePlayButton();
@@ -674,4 +796,5 @@ rotateBackground();
   refreshLauncherUpdate();
   setInterval(refreshStatus, 20000);
   setInterval(prepareClientConfig, 60000);
+  await maybeAutoPlay();
 })();
