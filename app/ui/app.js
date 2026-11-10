@@ -94,7 +94,7 @@ async function refreshClientStatus() {
         size: formatBytes(clientStatus.changedBytes),
       });
       $('client-notice').textContent = t('clientNotice');
-      $('client-notice').hidden = false;
+      $('client-notice').hidden = !setupReady;
     }
   } catch (e) {
     // Не блокируем игру только из-за недоступного манифеста: сервер мог
@@ -391,8 +391,10 @@ function updatePlayButton() {
   play.classList.toggle('running', state.playing);
   if (state.playing || busy) return;
   if (!hasClient) setStep(t('clientNotInstalled'), '');
-  else if (!setupReady) setStep(t('setupNeeded'), '');
-  else if (!clientReady) setStep('', '');
+  else if (!setupReady) {
+    setStep(t('setupNeeded'), '');
+    $('client-notice').hidden = true;
+  } else if (!clientReady) setStep('', '');
   else setStep('', '');
 }
 
