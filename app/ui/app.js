@@ -11,6 +11,9 @@ let updating = false;
 let launcherUpdate = null;
 let launcherUpdating = false;
 let clientReady = true;
+let setupReady = false;
+let preparing = false;
+let checksInfo = null;
 
 function toast(text) {
   const t = $('toast');
@@ -42,6 +45,31 @@ function formatBytes(bytes) {
     index += 1;
   }
   return `${value.toFixed(index === 0 || value >= 10 ? 0 : 1)} ${units[index]}`;
+}
+
+async function refreshSetupChecks() {
+  try {
+    checksInfo = await invoke('checks');
+    setupReady = !!(checksInfo.hosts && checksInfo.certificate);
+  } catch (e) {
+    checksInfo = null;
+    setupReady = false;
+    console.debug('checks:', e);
+  }
+  const el = $('system-state');
+  if (el) {
+    if (!checksInfo) {
+      el.textContent = t('checks', { e: '—' });
+      el.className = 'small ko';
+      el.title = '';
+    } else {
+      el.textContent = `${t('serverAddressCheck')}: ${checksInfo.hosts ? '✓' : '✗'} · ${t('serverCertCheck')}: ${checksInfo.certificate ? '✓' : '✗'}`;
+      el.className = 'small ' + (setupReady ? 'ok' : 'ko');
+      el.title = `${checksInfo.hostsDetail}\n${checksInfo.certificateDetail}`;
+    }
+  }
+  updatePlayButton();
+  return setupReady;
 }
 
 async function refreshClientStatus() {
@@ -268,6 +296,42 @@ async function runVerify() {
   }
 }
 
+async function runRepair() {
+  if (preparing || updating) return;
+  preparing = true;
+  updatePlayButton();
+  setStep(t('preparing'));
+  try {
+    await invoke('repair');
+    toast(t('pcReady'));
+  } catch (e) {
+    setStep(String(e), 'err');
+    toast(t('failed', { e }));
+  } finally {
+    preparing = false;
+    await refreshSetupChecks();
+    updatePlayButton();
+    refreshClientStatus();
+  }
+}
+
+async function removePatch() {
+  if (preparing || updating) return;
+  if (!confirm(t('removePatchConfirm'))) return;
+  preparing = true;
+  updatePlayButton();
+  try {
+    await invoke('remove_patch');
+    toast(t('removePatchDone'));
+  } catch (e) {
+    toast(t('removePatchFailed', { e }));
+  } finally {
+    preparing = false;
+    await refreshSetupChecks();
+    updatePlayButton();
+  }
+}
+
 // ------------------------------------------------------------------------------------------------ state
 // '' follows the system language; Rust gets the same language for its messages
 function setLanguage(setting) {
@@ -304,26 +368,32 @@ async function refresh() {
   }
   updatePlayButton();
   if (state.gameFound) prepareClientConfig();
+  await refreshSetupChecks();
   refreshClientStatus();
 }
 
 function updatePlayButton() {
   const play = $('play');
   const hasClient = !!state.gameFound;
+  const busy = updating || preparing || launcherUpdating;
   play.textContent = state.playing
     ? t('inGame')
-    : updating || launcherUpdating
+    : busy
       ? t('working')
       : !hasClient
         ? t('playInstall')
-        : !clientReady
-          ? t('playUpdate')
-          : t('play');
-  play.disabled = state.playing || updating || launcherUpdating;
+        : !setupReady
+          ? t('setupFix')
+          : !clientReady
+            ? t('playUpdate')
+            : t('play');
+  play.disabled = state.playing || busy;
   play.classList.toggle('running', state.playing);
-  if (!hasClient && !state.playing && !updating) setStep(t('clientNotInstalled'), '');
-  else if (hasClient && !clientReady && !updating) setStep('', '');
-  else if (hasClient && clientReady && !state.playing && !updating) setStep('', '');
+  if (state.playing || busy) return;
+  if (!hasClient) setStep(t('clientNotInstalled'), '');
+  else if (!setupReady) setStep(t('setupNeeded'), '');
+  else if (!clientReady) setStep('', '');
+  else setStep('', '');
 }
 
 async function refreshStatus() {
@@ -371,9 +441,13 @@ $('signup-link').addEventListener('click', (ev) => {
 
 // ------------------------------------------------------------------------------------------------ play
 $('play').addEventListener('click', async () => {
-  if (updating || launcherUpdating) return;
+  if (updating || preparing || launcherUpdating) return;
   if (!state.gameFound) {
     await installClient();
+    return;
+  }
+  if (!setupReady) {
+    await runRepair();
     return;
   }
   if (!clientReady) {
@@ -462,6 +536,7 @@ function gameDirState() {
 function openSettings() {
   fillSettings();
   refreshClientStatus();
+  refreshSetupChecks();
   $('settings').hidden = false;
   $('scrim').hidden = false;
 }
@@ -495,6 +570,7 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('sett
 
 $('check-client').addEventListener('click', runVerify);
 $('update-client').addEventListener('click', () => runUpdate('client', 'update_client', 'clientStarting'));
+$('remove-patch').addEventListener('click', removePatch);
 $('launcher-update-btn').addEventListener('click', installLauncherUpdate);
 listen('client', ({ payload }) => handleUpdateEvent(payload));
 listen('launcher-update', ({ payload }) => handleLauncherUpdateEvent(payload));

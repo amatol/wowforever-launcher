@@ -95,17 +95,9 @@ mod imp {
         }
     }
 
-    /// Relaunches this executable elevated (one UAC prompt) to write the hosts file and install the CA.
-    pub fn repair(settings: &Settings) -> Result<(), String> {
-        let ip = server_ip(&settings.server)?;
-        if !valid_portal(&settings.server.portal) {
-            return Err(t("bad_portal").into());
-        }
-        if settings.server.system_ca && portal_resolves_to(&settings.server.portal) == Some(ip) {
-            return Ok(());
-        }
+    fn run_elevated(params: &str) -> Result<(), String> {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        let params = HSTRING::from(format!("--admin-setup {ip} {}", settings.server.portal));
+        let params = HSTRING::from(params);
         let file = HSTRING::from(exe.as_os_str());
         let mut info = SHELLEXECUTEINFOW {
             cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
@@ -131,6 +123,48 @@ mod imp {
         Ok(())
     }
 
+    /// Relaunches this executable elevated (one UAC prompt) to write the hosts file and install the CA.
+    pub fn repair(settings: &Settings) -> Result<(), String> {
+        let ip = server_ip(&settings.server)?;
+        if !valid_portal(&settings.server.portal) {
+            return Err(t("bad_portal").into());
+        }
+        if check(settings).hosts && check(settings).certificate {
+            return Ok(());
+        }
+        run_elevated(&format!("--admin-setup {ip} {}", settings.server.portal))
+    }
+
+    /// Removes the hosts entry and the CA from the Windows trust store (one UAC prompt).
+    pub fn remove(settings: &Settings) -> Result<(), String> {
+        if !valid_portal(&settings.server.portal) {
+            return Err(t("bad_portal").into());
+        }
+        run_elevated(&format!("--admin-remove {}", settings.server.portal))
+    }
+
+    fn write_hosts(ip: Option<IpAddr>, portal: &str) -> bool {
+        let Ok(text) = std::fs::read_to_string(HOSTS) else { return false };
+        let mut lines: Vec<String> = text
+            .lines()
+            .filter(|l| !l.split('#').next().unwrap_or("").split_whitespace().skip(1).any(|h| h.eq_ignore_ascii_case(portal)))
+            .map(str::to_string)
+            .collect();
+        if let Some(ip) = ip {
+            lines.push(format!("{ip} {portal}  # Дримворлд Навсегда"));
+        }
+        std::fs::write(HOSTS, lines.join("\r\n") + "\r\n").is_ok()
+    }
+
+    fn machine_root_store() -> Option<HCERTSTORE> {
+        unsafe {
+            CertOpenStore(CERT_STORE_PROV_SYSTEM_W, CERT_QUERY_ENCODING_TYPE(0), None,
+                          CERT_OPEN_STORE_FLAGS(CERT_SYSTEM_STORE_LOCAL_MACHINE_ID << CERT_SYSTEM_STORE_LOCATION_SHIFT),
+                          Some(w!("ROOT").as_ptr() as _))
+            .ok()
+        }
+    }
+
     /// Runs in the elevated copy: `--admin-setup <ip> <portal>`. Returns the process exit code.
     pub fn admin_setup(ip: &str, portal: &str) -> i32 {
         let Ok(ip) = ip.parse::<IpAddr>() else { return 2 };
@@ -138,35 +172,46 @@ mod imp {
             return 2;
         }
         let mut code = 0;
-        // hosts: drop old lines for the portal, add ours
-        match std::fs::read_to_string(HOSTS) {
-            Ok(text) => {
-                let mut lines: Vec<&str> = text
-                    .lines()
-                    .filter(|l| !l.split('#').next().unwrap_or("").split_whitespace().skip(1).any(|h| h.eq_ignore_ascii_case(portal)))
-                    .collect();
-                let entry = format!("{ip} {portal}  # Дримворлд Навсегда");
-                lines.push(&entry);
-                if std::fs::write(HOSTS, lines.join("\r\n") + "\r\n").is_err() {
-                    code = 3;
-                }
-            }
-            Err(_) => code = 3,
+        if !write_hosts(Some(ip), portal) {
+            code = 3;
         }
-        // CA in the machine root store
         unsafe {
             let der = ca_der();
-            match CertOpenStore(CERT_STORE_PROV_SYSTEM_W, CERT_QUERY_ENCODING_TYPE(0), None,
-                                CERT_OPEN_STORE_FLAGS(CERT_SYSTEM_STORE_LOCAL_MACHINE_ID << CERT_SYSTEM_STORE_LOCATION_SHIFT),
-                                Some(w!("ROOT").as_ptr() as _)) {
-                Ok(store) => {
+            match machine_root_store() {
+                Some(store) => {
                     if CertAddEncodedCertificateToStore(store, X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, &der,
                                                         CERT_STORE_ADD_REPLACE_EXISTING, None).is_err() {
                         code = 4;
                     }
                     let _ = CertCloseStore(store, 0);
                 }
-                Err(_) => code = 4,
+                None => code = 4,
+            }
+        }
+        code
+    }
+
+    /// Runs in the elevated copy: `--admin-remove <portal>`. Returns the process exit code.
+    pub fn admin_remove(portal: &str) -> i32 {
+        if !valid_portal(portal) {
+            return 2;
+        }
+        let mut code = 0;
+        if !write_hosts(None, portal) {
+            code = 3;
+        }
+        unsafe {
+            let hash = ca_sha1();
+            let blob = CRYPT_INTEGER_BLOB { cbData: 20, pbData: hash.as_ptr() as *mut u8 };
+            if let Some(store) = machine_root_store() {
+                let found = CertFindCertificateInStore(store, X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, 0,
+                                                       CERT_FIND_SHA1_HASH, Some(&blob as *const _ as _), None);
+                if !found.is_null() && CertDeleteCertificateFromStore(found).is_err() {
+                    code = 4;
+                }
+                let _ = CertCloseStore(store, 0);
+            } else {
+                code = 4;
             }
         }
         code
@@ -186,6 +231,15 @@ mod imp {
 t=$(mktemp)
 awk -v h="$2" '{ line=$0; sub(/#.*/, "", line); n=split(line, f, /[ \t]+/); keep=1; for (i=2; i<=n; i++) if (f[i]==h) keep=0; if (keep) print $0 }' /etc/hosts > "$t"
 printf '%s %s  # Дримворлд Навсегда\n' "$1" "$2" >> "$t"
+cat "$t" > /etc/hosts
+rm -f "$t"
+dscacheutil -flushcache
+killall -HUP mDNSResponder || true
+"#;
+
+    const HOSTS_REMOVE_SCRIPT: &str = r#"set -e
+t=$(mktemp)
+awk -v h="$1" '{ line=$0; sub(/#.*/, "", line); n=split(line, f, /[ \t]+/); keep=1; for (i=2; i<=n; i++) if (f[i]==h) keep=0; if (keep) print $0 }' /etc/hosts > "$t"
 cat "$t" > /etc/hosts
 rm -f "$t"
 dscacheutil -flushcache
@@ -248,6 +302,35 @@ killall -HUP mDNSResponder || true
                 Ok(o) => errors.push(tf("cert_trust_failed", &[&String::from_utf8_lossy(&o.stderr).trim()])),
                 Err(e) => errors.push(format!("security : {e}")),
             }
+        }
+        if errors.is_empty() { Ok(()) } else { Err(errors.join(" ; ")) }
+    }
+
+    pub fn remove(settings: &Settings) -> Result<(), String> {
+        let mut errors = Vec::new();
+        let portal = &settings.server.portal;
+        if !valid_portal(portal) {
+            return Err(t("bad_portal").into());
+        }
+        let script = write_file("hosts-remove.sh", HOSTS_REMOVE_SCRIPT)?;
+        match Command::new("osascript")
+            .args(["-e", "on run argv",
+                   "-e", "do shell script \"/bin/sh \" & quoted form of item 1 of argv & \" \" & quoted form of item 2 of argv with prompt (item 3 of argv) with administrator privileges",
+                   "-e", "end run"])
+            .arg(&script)
+            .arg(portal)
+            .arg(t("hosts_prompt_remove"))
+            .output() {
+            Ok(o) if o.status.success() => {}
+            Ok(o) if String::from_utf8_lossy(&o.stderr).contains("-128") => errors.push(t("hosts_refused").to_string()),
+            Ok(o) => errors.push(tf("hosts_write_failed", &[&String::from_utf8_lossy(&o.stderr).trim()])),
+            Err(e) => errors.push(format!("osascript : {e}")),
+        }
+        let ca = write_file("forever_root_ca.crt", CA_PEM)?;
+        match Command::new("security").args(["remove-trusted-cert", "-d"]).arg(&ca).output() {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => errors.push(tf("cert_trust_failed", &[&String::from_utf8_lossy(&o.stderr).trim()])),
+            Err(e) => errors.push(format!("security : {e}")),
         }
         if errors.is_empty() { Ok(()) } else { Err(errors.join(" ; ")) }
     }
@@ -462,6 +545,33 @@ rm -f "$t""#;
         }
         if !settings.server.system_ca {
             if let Err(e) = install_ca_in_prefix(settings) {
+                errors.push(e);
+            }
+        }
+        if errors.is_empty() { Ok(()) } else { Err(errors.join(" ; ")) }
+    }
+
+    pub fn remove(settings: &Settings) -> Result<(), String> {
+        let mut errors = Vec::new();
+        let portal = &settings.server.portal;
+        if !valid_portal(portal) {
+            return Err(t("bad_portal").into());
+        }
+        let script = r#"set -e
+t=$(mktemp)
+awk -v h="$1" '{ line=$0; sub(/#.*/, "", line); n=split(line, f, /[ \t]+/); keep=1; for (i=2; i<=n; i++) if (f[i]==h) keep=0; if (keep) print $0 }' /etc/hosts > "$t"
+cat "$t" > /etc/hosts
+rm -f "$t""#;
+        match clean_env(&mut Command::new("pkexec")).args(["sh", "-c", script, "sh", portal]).status() {
+            Ok(s) if s.success() => {}
+            Ok(s) if s.code() == Some(126) => errors.push(t("hosts_refused").to_string()),
+            Ok(_) | Err(_) => errors.push(t("hosts_write_failed_pkexec").to_string()),
+        }
+        let sha = hex::encode_upper(ca_sha1());
+        let key = format!(r"HKLM\Software\Microsoft\SystemCertificates\Root\Certificates\{sha}");
+        if let Err(e) = run_in_prefix(settings, &["reg", "delete", &key, "/f"]) {
+            // Not an error when the CA was never installed.
+            if prefix_has_ca(&settings.linux.prefix) {
                 errors.push(e);
             }
         }

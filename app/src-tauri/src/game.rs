@@ -11,16 +11,32 @@ pub const WTF_NAME: &str = "ForeverLauncher.wtf";
 #[cfg(not(target_os = "macos"))]
 const LAUNCH_OPTIONS: &str = r"Software\Blizzard Entertainment\Battle.net\Launch Options\WoW";
 
-/// Update portal/locale in both the client's Config.wtf and the custom
-/// ForeverLauncher.wtf. The client reads Config.wtf for CVars even when
-/// `-config ForeverLauncher.wtf` is passed, so both must agree.
-fn rewrite_config(
-    path: &Path,
-    fallback: &str,
-    wanted: &[(&str, String)],
-    defaults: &[(&str, &str)],
-) -> Result<(), String> {
-    let text = std::fs::read_to_string(path).unwrap_or_else(|_| fallback.to_string());
+/// Ensures the launcher's WTF/ForeverLauncher.wtf has portal and locale, and
+/// the player's WTF/Config.wtf has **only** `SET portal`. No other CVars are
+/// added, changed or removed. Config.wtf may not exist before the first
+/// launch; in that case it is created with just the portal line.
+pub fn write_wtf(settings: &Settings) -> Result<(), String> {
+    let dir = Path::new(&settings.game_dir).join("WTF");
+    std::fs::create_dir_all(&dir).map_err(|e| tf("wtf_folder", &[&e]))?;
+    let custom = dir.join(WTF_NAME);
+    let config = dir.join("Config.wtf");
+
+    let config_text = std::fs::read_to_string(&config).unwrap_or_default();
+    let custom_text = std::fs::read_to_string(&custom)
+        .or_else(|_| std::fs::read_to_string(&config))
+        .unwrap_or_default();
+
+    rewrite_values(&custom, &custom_text, &[
+        ("portal", settings.server.portal.clone()),
+        ("textLocale", settings.locale.clone()),
+        ("audioLocale", settings.locale.clone()),
+    ])?;
+    rewrite_values(&config, &config_text, &[
+        ("portal", settings.server.portal.clone()),
+    ])
+}
+
+fn rewrite_values(path: &Path, text: &str, wanted: &[(&str, String)]) -> Result<(), String> {
     let mut lines: Vec<String> = text
         .lines()
         .filter(|line| !wanted.iter().any(|(key, _)| line.starts_with(&format!("SET {key} "))))
@@ -29,45 +45,8 @@ fn rewrite_config(
     for (key, value) in wanted {
         lines.push(format!("SET {key} \"{value}\""));
     }
-    // Только для отсутствующих ключей: не перетираем настройки графики,
-    // которые игрок выбрал в самой игре.
-    for (key, value) in defaults {
-        if !lines.iter().any(|line| line.starts_with(&format!("SET {key} "))) {
-            lines.push(format!("SET {key} \"{value}\""));
-        }
-    }
     std::fs::write(path, lines.join("\r\n") + "\r\n")
         .map_err(|error| format!("{} : {error}", path.display()))
-}
-
-/// Writes the portal and locale into WTF/Config.wtf and WTF/ForeverLauncher.wtf.
-pub fn write_wtf(settings: &Settings) -> Result<(), String> {
-    let dir = Path::new(&settings.game_dir).join("WTF");
-    std::fs::create_dir_all(&dir).map_err(|e| tf("wtf_folder", &[&e]))?;
-    let custom = dir.join(WTF_NAME);
-    let config = dir.join("Config.wtf");
-    let custom_text = std::fs::read_to_string(&custom)
-        .or_else(|_| std::fs::read_to_string(&config))
-        .unwrap_or_default();
-    let config_text = std::fs::read_to_string(&config)
-        .or_else(|_| std::fs::read_to_string(&custom))
-        .unwrap_or_default();
-    let wanted = [
-        ("portal", settings.server.portal.clone()),
-        ("textLocale", settings.locale.clone()),
-        ("audioLocale", settings.locale.clone()),
-    ];
-    let defaults = [
-        ("gxApi", "D3D11"),
-        ("gxWindow", "1"),
-        ("gxMaximize", "0"),
-        ("gxResolution", "1280x720"),
-        ("gxRefresh", "60"),
-        ("vsync", "0"),
-    ];
-    rewrite_config(&custom, &custom_text, &wanted, &defaults)?;
-    rewrite_config(&config, &config_text, &wanted, &defaults)?;
-    Ok(())
 }
 
 /// Stores the login ticket where the client reads it with -launcherlogin.

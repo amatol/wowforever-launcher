@@ -9,6 +9,9 @@ fn main() {
         if args.len() == 4 && args[1] == "--admin-setup" {
             std::process::exit(forever_launcher_lib::admin_setup(&args[2], &args[3]));
         }
+        if args.len() == 3 && args[1] == "--admin-remove" {
+            std::process::exit(forever_launcher_lib::admin_remove(&args[2]));
+        }
     }
     // WebKitGTK: the DMA-BUF renderer gives a blank window on some GPU/Wayland setups (NVIDIA...)
     #[cfg(target_os = "linux")]

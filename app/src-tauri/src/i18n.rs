@@ -97,6 +97,7 @@ const MESSAGES: &[(&str, Texts)] = &[
     ("admin_refused", ["права администратора отклонены", "administrator permission refused", "permiso de administrador denegado", "permissão de administrador recusada"]),
     ("install_wait", ["не удалось дождаться установки", "could not wait for the installation", "no se pudo esperar a la instalación", "não foi possível aguardar a instalação"]),
     ("install_failed", ["установка не удалась (код {})", "installation failed (code {})", "la instalación falló (código {})", "a instalação falhou (código {})"]),
+    ("hosts_prompt_remove", ["Дримворлд Навсегда: удаляем сервер из файла hosts.", "Dreamworld Forever: removing the server from the hosts file.", "Dreamworld Forever: quitando el servidor del archivo hosts.", "Dreamworld Forever: removendo o servidor do arquivo hosts."]),
     ("hosts_prompt", ["Дримворлд Навсегда: добавляем сервер в файл hosts.", "Dreamworld Forever: adding the server to the hosts file.", "Forever Launcher: añadiendo el servidor al archivo hosts.", "Forever Launcher: adicionando o servidor ao arquivo hosts."]),
     ("hosts_refused", ["доступ к файлу hosts отклонён", "permission refused for the hosts file", "permiso denegado para el archivo hosts", "permissão recusada para o arquivo hosts"]),
     ("hosts_write_failed", ["не удалось записать hosts: {}", "could not write the hosts file: {}", "no se pudo escribir el archivo hosts: {}", "não foi possível gravar o arquivo hosts: {}"]),

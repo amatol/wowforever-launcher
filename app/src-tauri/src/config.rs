@@ -37,7 +37,7 @@ impl Default for Server {
     fn default() -> Self {
         Self {
             name: built_in(option_env!("FOREVER_SERVER_NAME"), "Дримворлд Навсегда"),
-            portal: "trinity.actual.mmolabs.ru".into(),
+            portal: "trinity.actual.battle.net".into(),
             address: built_in(option_env!("FOREVER_SERVER_ADDRESS"), "92.42.44.9"),
             bnet_port: 1119,
             rest_port: 8081,
@@ -45,7 +45,7 @@ impl Default for Server {
             public_key: STOCK_PUBLIC_KEY.into(),
             region_group: 8,
             website: built_in(option_env!("FOREVER_WEBSITE"), "https://forever.mmolabs.ru/launcher"),
-            system_ca: true,
+            system_ca: false,
         }
     }
 }

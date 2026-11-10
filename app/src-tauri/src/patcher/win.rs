@@ -7,7 +7,10 @@ use windows::Win32::System::Diagnostics::Debug::{ReadProcessMemory, WriteProcess
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
-use windows::Win32::System::Memory::{VirtualQueryEx, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_PRIVATE, PAGE_READWRITE};
+use windows::Win32::System::Memory::{
+    VirtualProtectEx, VirtualQueryEx, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_PRIVATE,
+    PAGE_PROTECTION_FLAGS, PAGE_READWRITE,
+};
 use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
 use windows::Win32::System::Threading::{
     GetExitCodeProcess, OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION, PROCESS_VM_READ, PROCESS_VM_WRITE,
@@ -86,9 +89,25 @@ impl Memory for ProcessMemory {
 
     fn write(&self, addr: u64, data: &[u8]) -> bool {
         let mut written = 0usize;
+        let mut old = PAGE_PROTECTION_FLAGS(0);
         unsafe {
-            WriteProcessMemory(self.handle, addr as *const c_void, data.as_ptr() as *const c_void, data.len(), Some(&mut written)).is_ok()
-                && written == data.len()
+            // .rdata клиента доступна только на чтение; на время записи
+            // открываем страницу, затем возвращаем исходную защиту.
+            if VirtualProtectEx(self.handle, addr as *const c_void, data.len(), PAGE_READWRITE, &mut old).is_err() {
+                return false;
+            }
+            let ok = WriteProcessMemory(
+                self.handle,
+                addr as *const c_void,
+                data.as_ptr() as *const c_void,
+                data.len(),
+                Some(&mut written),
+            )
+            .is_ok()
+                && written == data.len();
+            let mut restored = PAGE_PROTECTION_FLAGS(0);
+            let _ = VirtualProtectEx(self.handle, addr as *const c_void, data.len(), old, &mut restored);
+            ok
         }
     }
 
