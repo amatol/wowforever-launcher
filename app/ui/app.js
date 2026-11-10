@@ -312,7 +312,7 @@ function updatePlayButton() {
   play.disabled = state.playing || updating || launcherUpdating;
   play.classList.toggle('running', state.playing);
   if (!hasClient && !state.playing && !updating) setStep(t('clientNotInstalled'), '');
-  else if (hasClient && !clientReady && !updating) setStep(t('clientUpdateShort'), '');
+  else if (hasClient && !clientReady && !updating) setStep('', '');
   else if (hasClient && clientReady && !state.playing && !updating) setStep('', '');
 }
 
