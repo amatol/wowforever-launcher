@@ -71,6 +71,7 @@ mod imp {
     use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
     use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
     use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
+    use std::process::Command;
 
     const HOSTS: &str = r"C:\Windows\System32\drivers\etc\hosts";
 
@@ -175,6 +176,7 @@ mod imp {
         if !write_hosts(Some(ip), portal) {
             code = 3;
         }
+        let _ = Command::new("ipconfig").arg("/flushdns").status();
         unsafe {
             let der = ca_der();
             match machine_root_store() {
@@ -200,6 +202,7 @@ mod imp {
         if !write_hosts(None, portal) {
             code = 3;
         }
+        let _ = Command::new("ipconfig").arg("/flushdns").status();
         unsafe {
             let hash = ca_sha1();
             let blob = CRYPT_INTEGER_BLOB { cbData: 20, pbData: hash.as_ptr() as *mut u8 };
