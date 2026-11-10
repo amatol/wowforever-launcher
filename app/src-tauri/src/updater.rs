@@ -17,6 +17,9 @@ pub struct ManifestFile {
     pub size: u64,
     pub sha256: String,
     pub http_url: String,
+    /// Сверять SHA-256 локального файла, а не только размер.
+    #[serde(default)]
+    pub verify_sha256: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -178,9 +181,12 @@ fn file_size(path: &Path) -> Option<u64> {
     std::fs::metadata(path).ok().map(|meta| meta.len())
 }
 
-fn file_matches(path: &Path, size: u64, expected_sha: &str) -> bool {
+fn file_matches(path: &Path, size: u64, expected_sha: &str, verify_sha256: bool) -> bool {
     if file_size(path) != Some(size) {
         return false;
+    }
+    if !verify_sha256 {
+        return true;
     }
     let Ok(mut file) = std::fs::File::open(path) else {
         return false;
@@ -207,7 +213,7 @@ pub async fn client_status(settings: &Settings) -> Result<ClientStatus, String> 
     let mut changed_bytes = 0u64;
     for file in &manifest.files {
         let path = root.join(safe_relative(&file.path)?);
-        if file_size(&path) != Some(file.size) {
+        if !file_matches(&path, file.size, &file.sha256, file.verify_sha256) {
             changed_files += 1;
             changed_bytes = changed_bytes.saturating_add(file.size);
         }
@@ -249,7 +255,7 @@ pub async fn update_client(app: &AppHandle, settings: &Settings) -> Result<(), S
     for file in &manifest.files {
         let relative = safe_relative(&file.path)?;
         let path = root.join(&relative);
-        if file_size(&path) != Some(file.size) {
+        if !file_matches(&path, file.size, &file.sha256, file.verify_sha256) {
             entries.push(DownloadEntry {
                 path: file.path.clone(),
                 url: file.http_url.clone(),
@@ -302,7 +308,7 @@ pub async fn addons_status(settings: &Settings) -> Result<AddonsStatus, String> 
         for file in &addon.files {
             total_files += 1;
             let path = root.join(safe_relative(&file.path)?);
-            if !file_matches(&path, file.size, &file.sha256) {
+            if !file_matches(&path, file.size, &file.sha256, true) {
                 changed_files += 1;
                 changed_bytes = changed_bytes.saturating_add(file.size);
             }
@@ -326,7 +332,7 @@ pub async fn update_addons(app: &AppHandle, settings: &Settings) -> Result<(), S
     for addon in &manifest.addons {
         for file in &addon.files {
             let relative = safe_relative(&file.path)?;
-            if !file_matches(&root.join(&relative), file.size, &file.sha256) {
+            if !file_matches(&root.join(&relative), file.size, &file.sha256, true) {
                 entries.push(DownloadEntry {
                     path: file.path.clone(),
                     url: file.download_url.clone(),

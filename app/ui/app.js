@@ -11,6 +11,7 @@ let updating = false;
 let launcherUpdate = null;
 let launcherUpdating = false;
 let setupReady = false;
+let clientReady = true;
 
 function toast(text) {
   const t = $('toast');
@@ -46,12 +47,16 @@ function formatBytes(bytes) {
 
 async function refreshClientStatus() {
   if (!state || !state.gameFound) {
+    clientReady = false;
     $('client-state').textContent = t('chooseGameDir');
     $('client-notice').hidden = true;
+    updatePlayButton();
     return;
   }
   try {
     clientStatus = await invoke('client_status');
+    clientReady = clientStatus.upToDate;
+    updatePlayButton();
     if (updating) return;
     if (clientStatus.upToDate) {
       $('client-state').textContent = t('clientUpToDate');
@@ -65,8 +70,11 @@ async function refreshClientStatus() {
       $('client-notice').hidden = false;
     }
   } catch (e) {
+    // Не блокируем игру только из-за недоступного манифеста: сервер мог
+    // временно не ответить, а клиент при этом рабочий.
     $('client-state').textContent = t('updateError', { e });
     $('client-notice').hidden = true;
+    updatePlayButton();
   }
 }
 
@@ -240,7 +248,7 @@ async function refresh() {
 
 function updatePlayButton() {
   const play = $('play');
-  play.disabled = state.playing || !state.gameFound || updating || launcherUpdating || !setupReady;
+  play.disabled = state.playing || !state.gameFound || updating || launcherUpdating || !setupReady || !clientReady;
   play.classList.toggle('running', state.playing);
   play.textContent = state.playing ? t('inGame') : t('play');
   if (!state.gameFound && !state.playing) setStep(t('chooseGameDir'), 'err');
