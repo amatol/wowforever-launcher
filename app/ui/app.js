@@ -48,7 +48,7 @@ function formatBytes(bytes) {
 async function refreshClientStatus() {
   if (!state || !state.gameFound) {
     clientReady = false;
-    $('client-state').textContent = t('chooseGameDir');
+    $('client-state').textContent = t('clientNotInstalled');
     $('client-notice').hidden = true;
     updatePlayButton();
     return;
@@ -86,6 +86,8 @@ function handleUpdateEvent(payload) {
     $('update-progress').hidden = false;
     $('update-bar').style.width = '0%';
     $('update-detail').textContent = t(startKey);
+    $('client-notice').textContent = t(startKey);
+    $('client-notice').hidden = false;
     return;
   }
   if (payload.kind === 'progress') {
@@ -93,13 +95,17 @@ function handleUpdateEvent(payload) {
     $('update-progress').hidden = false;
     $('update-bar').style.width = `${percent}%`;
     const file = payload.file ? ` · ${String(payload.file).split('/').pop()}` : '';
-    $('update-detail').textContent =
-      t(progressKey, { current: payload.current, total: payload.total, percent: percent.toFixed(1) }) + file;
+    const detail = t(progressKey, { current: payload.current, total: payload.total, percent: percent.toFixed(1) }) + file;
+    $('update-detail').textContent = detail;
+    $('client-notice').textContent = detail;
+    $('client-notice').hidden = false;
     return;
   }
   if (payload.kind === 'done') {
     $('update-bar').style.width = '100%';
     $('update-detail').textContent = t(doneKey);
+    $('client-notice').textContent = t(doneKey);
+    $('client-notice').hidden = false;
     toast(t(doneKey));
     updating = false;
     updatePlayButton();
@@ -116,7 +122,7 @@ function handleUpdateEvent(payload) {
 
 async function installClient() {
   if (updating) return;
-  const selected = $('s-game-dir').value.trim();
+  const selected = $('s-game-dir').value.trim() || state.settings.gameDir;
   if (!selected) {
     toast(t('chooseGameDir'));
     return;
@@ -187,16 +193,30 @@ async function refresh() {
     $('avatar').textContent = state.email[0].toUpperCase();
   }
   updatePlayButton();
-  $('download-client-box').hidden = state.gameFound;
   refreshClientStatus();
 }
 
 function updatePlayButton() {
   const play = $('play');
-  play.disabled = state.playing || !state.gameFound || updating || launcherUpdating || !setupReady || !clientReady;
+  const hasClient = !!state.gameFound;
+  play.textContent = state.playing
+    ? t('inGame')
+    : updating || launcherUpdating
+      ? t('working')
+      : !hasClient
+        ? t('playInstall')
+        : !clientReady
+          ? t('playUpdate')
+          : t('play');
+  play.disabled =
+    state.playing ||
+    updating ||
+    launcherUpdating ||
+    (hasClient && clientReady && !setupReady);
   play.classList.toggle('running', state.playing);
-  play.textContent = state.playing ? t('inGame') : t('play');
-  if (!state.gameFound && !state.playing) setStep(t('chooseGameDir'), 'err');
+  if (!hasClient && !state.playing && !updating) setStep(t('clientNotInstalled'), '');
+  else if (hasClient && !clientReady && !updating) setStep(t('clientUpdateShort'), '');
+  else if (hasClient && clientReady && setupReady && !state.playing && !updating) setStep('', '');
 }
 
 async function refreshStatus() {
@@ -288,6 +308,15 @@ $('signup-link').addEventListener('click', (ev) => {
 
 // ------------------------------------------------------------------------------------------------ play
 $('play').addEventListener('click', async () => {
+  if (updating || launcherUpdating) return;
+  if (!state.gameFound) {
+    await installClient();
+    return;
+  }
+  if (!clientReady) {
+    await runUpdate('client', 'update_client', 'clientStarting');
+    return;
+  }
   $('log').textContent = '';
   state.playing = true;
   updatePlayButton();
@@ -408,7 +437,6 @@ $('check-client').addEventListener('click', async () => {
   await refreshClientStatus();
   if (clientStatus && clientStatus.upToDate) toast(t('clientUpToDate'));
 });
-$('download-client').addEventListener('click', installClient);
 $('update-client').addEventListener('click', () => runUpdate('client', 'update_client', 'clientStarting'));
 $('launcher-update-btn').addEventListener('click', installLauncherUpdate);
 listen('client', ({ payload }) => handleUpdateEvent(payload));

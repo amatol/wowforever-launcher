@@ -131,7 +131,7 @@ impl Settings {
         // server/portal values left in an old settings.json.
         s.server = Server::default();
         if s.game_dir.is_empty() {
-            s.game_dir = detect_game_dir().unwrap_or_default();
+            s.game_dir = default_game_dir();
         }
         if s.locale.is_empty() {
             s.locale = installed_locale(Path::new(&s.game_dir)).unwrap_or_else(|| "enUS".into());
@@ -227,6 +227,33 @@ fn game_binary(dir: &Path) -> PathBuf {
         .unwrap_or_else(|| dir.join("World of Warcraft.app"))
 }
 
+/// Папка `_forever_` рядом с EXE лаунчера. Если лаунчер уже лежит внутри
+/// `_forever_`, используем её саму.
+fn default_game_dir() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        return home()
+            .join("Applications/World of Warcraft/_forever_")
+            .to_string_lossy()
+            .into_owned();
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let base = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(Path::to_path_buf))
+            .unwrap_or_else(home);
+        let inside = base
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.eq_ignore_ascii_case("_forever_"))
+            .unwrap_or(false);
+        let game = if inside { base } else { base.join("_forever_") };
+        game.to_string_lossy().into_owned()
+    }
+}
+
+#[allow(dead_code)]
 fn detect_game_dir() -> Option<String> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     #[cfg(windows)]
