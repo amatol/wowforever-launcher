@@ -58,7 +58,7 @@ jobs:
           name: DreamworldForever-Launcher-Windows
           path: |
             app/src-tauri/target/release/bundle/nsis/*.exe
-            "app/src-tauri/target/release/Forever AI.exe"
+            app/src-tauri/target/release/Forever*.exe
           if-no-files-found: error
 
   release:
