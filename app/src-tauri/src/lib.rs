@@ -356,6 +356,7 @@ async fn start(app: &AppHandle, settings: Settings) -> Result<(), String> {
     let s = settings.clone();
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         game::write_wtf(&s)?;
+        game::clear_cache_once(&s)?;
         #[cfg(target_os = "linux")]
         if !s.server.system_ca {
             system::install_ca_in_prefix(&s)?;
