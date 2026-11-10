@@ -89,6 +89,7 @@ fn save_settings(state: State<AppState>, mut settings: Settings) -> Result<(), S
     // The launcher works only with our server; ignore any server fields sent
     // by an old UI or a hand-edited settings.json.
     settings.server = Default::default();
+    settings.game_dir = config::default_game_dir();
     settings.save().map_err(|e| e.to_string())?;
     *state.settings.lock().unwrap() = settings;
     Ok(())
@@ -216,23 +217,19 @@ async fn verify_client(app: AppHandle, state: State<'_, AppState>) -> Result<(),
 }
 
 #[tauri::command]
-async fn install_client(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    path: String,
-) -> Result<(), String> {
+async fn install_client(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     if state.playing.load(Ordering::SeqCst) {
         return Err("Нельзя устанавливать клиент во время игры".into());
     }
     let settings = state.settings.lock().unwrap().clone();
-    let root = updater::normalize_install_root(Path::new(&path))?;
+    let root = updater::normalize_install_root(Path::new(&settings.game_dir))?;
     updater::install_client(&app, &settings, &root).await?;
     let game_dir = root.join("_forever_");
     if !game_dir.join("Wow.exe").is_file() {
         return Err("После установки не найден _forever_/Wow.exe".into());
     }
     let mut current = state.settings.lock().unwrap();
-    current.game_dir = game_dir.to_string_lossy().into_owned();
+    current.game_dir = config::default_game_dir();
     current.save().map_err(|error| error.to_string())?;
     Ok(())
 }

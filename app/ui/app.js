@@ -239,21 +239,14 @@ function handleUpdateEvent(payload) {
 
 async function installClient() {
   if (updating) return;
-  const selected = $('s-game-dir').value.trim() || state.settings.gameDir;
-  if (!selected) {
-    toast(t('chooseGameDir'));
-    return;
-  }
   updating = true;
   updatePlayButton();
   $('update-progress').hidden = false;
   $('update-bar').style.width = '0%';
   $('update-detail').textContent = t('clientStarting');
   try {
-    await invoke('install_client', { path: selected });
+    await invoke('install_client');
     await refresh();
-    $('s-game-dir').value = state.settings.gameDir;
-    gameDirState();
     refreshClientStatus();
     toast(t('clientDone'));
   } catch (e) {
@@ -528,7 +521,6 @@ function option(select, value, label) {
 
 function fillSettings() {
   draft = structuredClone(state.settings);
-  $('s-game-dir').value = draft.gameDir;
   const loc = $('s-locale');
   loc.replaceChildren();
   state.locales.forEach((l) => option(loc, l, l));
@@ -550,16 +542,6 @@ function fillSettings() {
   option(language, '', t('systemLanguage'));
   Object.entries(LANGUAGES).forEach(([code, name]) => option(language, code, name));
   language.value = draft.language || '';
-  gameDirState();
-}
-
-function gameDirState() {
-  const el = $('game-dir-state');
-  const dir = $('s-game-dir').value.trim();
-  const same = dir === state.settings.gameDir;
-  const game = state.platform === 'macos' ? t('gameApp') : 'Wow.exe';
-  el.textContent = !dir ? t('noFolder') : same && state.gameFound ? t('gameFound', { game }) : same ? t('gameMissing', { game }) : '';
-  el.className = 'small ' + (same && state.gameFound ? 'ok' : dir && same ? 'ko' : '');
 }
 
 function openSettings() {
@@ -577,13 +559,7 @@ function closeSettings() {
 
 async function pick(input, title) {
   const dir = await window.__TAURI__.dialog.open({ directory: true, title, defaultPath: input.value || undefined });
-  if (dir) {
-    input.value = dir;
-    if (input.id === 's-game-dir') {
-      const loc = await invoke('detect_locale', { gameDir: dir });
-      if (loc) $('s-locale').value = loc;
-    }
-  }
+  if (dir) input.value = dir;
 }
 
 $('open-settings').addEventListener('click', openSettings);
@@ -592,9 +568,7 @@ $('play-settings').addEventListener('click', openSettings);
 $('close-settings').addEventListener('click', closeSettings);
 $('cancel-settings').addEventListener('click', closeSettings);
 $('scrim').addEventListener('click', closeSettings);
-$('pick-game').addEventListener('click', () => pick($('s-game-dir'), t('pickGameDir')));
 $('pick-prefix').addEventListener('click', () => pick($('s-prefix'), t('pickPrefix')));
-$('s-game-dir').addEventListener('input', gameDirState);
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('settings').hidden) closeSettings(); });
 
 $('check-client').addEventListener('click', runVerify);
@@ -605,7 +579,6 @@ listen('client', ({ payload }) => handleUpdateEvent(payload));
 listen('launcher-update', ({ payload }) => handleLauncherUpdateEvent(payload));
 
 $('save-settings').addEventListener('click', async () => {
-  draft.gameDir = $('s-game-dir').value.trim();
   draft.locale = $('s-locale').value;
   draft.language = $('s-language').value;
   if (state.platform === 'linux') {

@@ -144,9 +144,9 @@ impl Settings {
         // The launcher is intentionally bound to our server only. Ignore any
         // server/portal values left in an old settings.json.
         s.server = Server::default();
-        if s.game_dir.is_empty() {
-            s.game_dir = default_game_dir();
-        }
+        // The game folder is not configurable: it is always _forever_ next to
+        // the launcher EXE (or the launcher's own folder if it is inside it).
+        s.game_dir = default_game_dir();
         if s.locale.is_empty() {
             s.locale = installed_locale(Path::new(&s.game_dir)).unwrap_or_else(|| "enUS".into());
         }
@@ -247,7 +247,7 @@ fn game_binary(dir: &Path) -> PathBuf {
 
 /// Папка `_forever_` рядом с EXE лаунчера. Если лаунчер уже лежит внутри
 /// `_forever_`, используем её саму.
-fn default_game_dir() -> String {
+pub fn default_game_dir() -> String {
     #[cfg(target_os = "macos")]
     {
         return home()

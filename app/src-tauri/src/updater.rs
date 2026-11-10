@@ -206,10 +206,10 @@ pub async fn client_status(settings: &Settings) -> Result<ClientStatus, String> 
         }
     }
     if build_differs {
-        changed_files += 1;
-        changed_bytes = changed_bytes.saturating_add(
-            manifest.files.iter().find(|file| file.path == ".build.info").map(|file| file.size).unwrap_or(0),
-        );
+        // A new game build can change any CASC archive. Only the .build.info
+        // marker is not enough: request a full client replacement.
+        changed_files = manifest.files.len();
+        changed_bytes = manifest.files.iter().map(|file| file.size).sum();
     }
     // Отсутствие .launcher_version у готового клиента не делает его устаревшим:
     // сравниваем реальные размеры файлов и build из .build.info.
@@ -322,6 +322,21 @@ async fn update_client_inner(
                 size: file.size,
                 sha256: file.sha256.clone(),
             });
+        }
+    }
+    // Новая сборка клиента: скачиваем весь набор файлов, иначе CASC
+    // останется смешанным из старых и новых архивов.
+    if build_differs {
+        let mut present: HashSet<String> = entries.iter().map(|entry| entry.path.clone()).collect();
+        for file in &manifest.files {
+            if present.insert(file.path.clone()) {
+                entries.push(DownloadEntry {
+                    path: file.path.clone(),
+                    url: file.http_url.clone(),
+                    size: file.size,
+                    sha256: file.sha256.clone(),
+                });
+            }
         }
     }
     // Если повреждён хотя бы один архив Data, обновляем весь Data целиком:
