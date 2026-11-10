@@ -17,6 +17,7 @@ let checksInfo = null;
 let autoUpdateTried = false;
 let autoPlayActive = false;
 let autoPlayStarted = false;
+let autoPlayLaunched = false;
 
 function toast(text) {
   const t = $('toast');
@@ -71,6 +72,7 @@ function autoProgress(percent) {
 
 function autoStop(showWindow = true) {
   autoPlayActive = false;
+  autoPlayLaunched = false;
   invoke('cancel_quit').catch(() => {});
   $('autoplay').hidden = true;
   $('auto-progress').hidden = true;
@@ -112,7 +114,13 @@ async function maybeAutoPlay() {
     const checks = await invoke('checks');
     if (!checks.hosts || !checks.certificate) {
       autoDetail(t('autoPreparing'));
-      const repaired = await invoke('repair');
+      preparing = true;
+      let repaired;
+      try {
+        repaired = await invoke('repair');
+      } finally {
+        preparing = false;
+      }
       if (!repaired.hosts || !repaired.certificate) throw new Error(t('setupNeeded'));
     }
 
@@ -122,7 +130,12 @@ async function maybeAutoPlay() {
     if (!status.upToDate) {
       autoProgress(0);
       autoDetail(t('autoUpdatingClient'));
-      await invoke('update_client');
+      updating = true;
+      try {
+        await invoke('update_client');
+      } finally {
+        updating = false;
+      }
       status = await invoke('client_status');
       if (!status.upToDate) throw new Error(t('autoUpdateFailed'));
     }
@@ -130,6 +143,7 @@ async function maybeAutoPlay() {
     // 5. Launch and hide the launcher; the Rust process stays for the key patch.
     autoDetail(t('autoLaunching'));
     await invoke('play');
+    autoPlayLaunched = true;
     autoDetail(t('autoRunning'));
     setTimeout(() => {
       if (autoPlayActive) invoke('hide_launcher').catch(() => {});
@@ -226,7 +240,7 @@ async function refreshLauncherUpdate() {
   if (!autoUpdateTried && !updating && !preparing) {
     autoUpdateTried = true;
     setTimeout(() => {
-      if (!launcherUpdating && !updating && !preparing) installLauncherUpdate();
+      if (!launcherUpdating && !updating && !preparing && !autoPlayLaunched && !state.playing) installLauncherUpdate();
     }, 1500);
   }
 }
@@ -264,7 +278,7 @@ function handleLauncherUpdateEvent(payload) {
 }
 
 async function installLauncherUpdate() {
-  if (launcherUpdating || updating || preparing || !launcherUpdate) return;
+  if (launcherUpdating || updating || preparing || autoPlayLaunched || state?.playing || !launcherUpdate) return;
   launcherUpdating = true;
   updatePlayButton();
   const btn = $('launcher-update-btn');
