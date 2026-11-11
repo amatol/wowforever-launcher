@@ -1,32 +1,36 @@
 //! Самообновление лаунчера через `launcher_manifest.json`.
 //!
 //! Манифест публикуется на нашем сайте рядом с EXE. Лаунчер сравнивает версии,
-//! скачивает новый EXE, проверяет размер и SHA-256 и запускает небольшой
-//! Windows-скрипт, который ждёт выхода текущего процесса, заменяет файл и
-//! перезапускает лаунчер. Ключ подписи не нужен: целостность проверяется
-//! SHA-256 из HTTPS-манифеста.
+//! скачивает новый файл, проверяет размер и SHA-256 и заменяет себя:
+//! Windows — небольшой скрипт ждёт выхода процесса, заменяет EXE и перезапускает
+//! лаунчер; Linux — новый AppImage атомарно переименовывается поверх старого
+//! (работающий файл можно заменить) и запускается сразу.
+//! Ключ подписи не нужен: целостность проверяется SHA-256 из HTTPS-манифеста.
 
 use crate::config::Settings;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 use sha2::{Digest, Sha256};
-#[cfg(windows)]
-use std::path::Path;
+#[cfg(any(windows, target_os = "linux"))]
+use std::path::{Path, PathBuf};
 use std::time::Duration;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 use std::time::Instant;
 use tauri::AppHandle;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 use tauri::Emitter;
+
+/// Linux updates only the AppImage build; it has its own manifest next to the Windows one.
+const SUPPORTED: bool = cfg!(windows) || cfg!(target_os = "linux");
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct LauncherManifest {
     pub version: String,
     pub download_url: String,
     pub size: u64,
-    #[cfg_attr(not(windows), allow(dead_code))]
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub sha256: String,
     #[serde(default)]
     pub changelog: String,
@@ -44,7 +48,7 @@ pub struct LauncherUpdateStatus {
     pub supported: bool,
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LauncherUpdateEvent {
@@ -80,7 +84,8 @@ fn manifest_url(settings: &Settings) -> Result<String, String> {
     if base.is_empty() {
         return Err("В настройках не указан сайт сервера".into());
     }
-    Ok(format!("{base}/launcher_manifest.json"))
+    let name = if cfg!(target_os = "linux") { "launcher_manifest_linux.json" } else { "launcher_manifest.json" };
+    Ok(format!("{base}/{name}"))
 }
 
 async fn fetch_manifest(settings: &Settings) -> Result<LauncherManifest, String> {
@@ -113,11 +118,20 @@ pub async fn status(settings: &Settings) -> Result<LauncherUpdateStatus, String>
         size: manifest.size,
         changelog: manifest.changelog,
         download_url: manifest.download_url,
-        supported: cfg!(windows),
+        supported: supported(),
     })
 }
 
-#[cfg(windows)]
+/// Linux: only a launcher started as an AppImage can replace itself.
+fn supported() -> bool {
+    #[cfg(target_os = "linux")]
+    if crate::config::appimage_path().is_none() {
+        return false;
+    }
+    SUPPORTED
+}
+
+#[cfg(any(windows, target_os = "linux"))]
 fn emit(app: &AppHandle, kind: &str, percent: f64, message: impl Into<String>) {
     let _ = app.emit(
         "launcher-update",
@@ -129,7 +143,7 @@ fn emit(app: &AppHandle, kind: &str, percent: f64, message: impl Into<String>) {
     );
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 pub async fn install(app: &AppHandle, settings: &Settings) -> Result<(), String> {
     use tokio::io::AsyncWriteExt;
 
@@ -145,7 +159,10 @@ pub async fn install(app: &AppHandle, settings: &Settings) -> Result<(), String>
         return Err("Манифест лаунчера должен ссылаться на HTTPS".into());
     }
 
-    let current = std::env::current_exe().map_err(|error| format!("Не удалось найти EXE лаунчера: {error}"))?;
+    if !supported() {
+        return Err("Автообновление доступно только для AppImage-версии лаунчера".into());
+    }
+    let current = crate::config::launcher_path().ok_or_else(|| "Не удалось найти файл лаунчера".to_string())?;
     let parent = current
         .parent()
         .ok_or_else(|| "У EXE лаунчера нет родительской папки".to_string())?;
@@ -157,10 +174,7 @@ pub async fn install(app: &AppHandle, settings: &Settings) -> Result<(), String>
         .map_err(|error| format!("Нет прав на запись в папку лаунчера {}: {error}", parent.display()))?;
     let _ = std::fs::remove_file(&probe);
 
-    let temporary = std::env::temp_dir().join(format!(
-        "forever-ai-launcher-update-{}.exe",
-        std::process::id()
-    ));
+    let temporary = temporary_path(&current);
     let _ = std::fs::remove_file(&temporary);
 
     let client = reqwest::Client::builder()
@@ -235,14 +249,49 @@ pub async fn install(app: &AppHandle, settings: &Settings) -> Result<(), String>
     }
 
     emit(app, "done", 100.0, "Обновление загружено, лаунчер перезапустится");
-    spawn_replacer(&current, &temporary)?;
+    if let Err(error) = spawn_replacer(&current, &temporary) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
     app.exit(0);
     Ok(())
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
 pub async fn install(_app: &AppHandle, _settings: &Settings) -> Result<(), String> {
-    Err("Автообновление лаунчера доступно в Windows-версии".into())
+    Err("Автообновление лаунчера доступно в Windows- и Linux-версии".into())
+}
+
+#[cfg(windows)]
+fn temporary_path(_current: &Path) -> PathBuf {
+    std::env::temp_dir().join(format!("forever-ai-launcher-update-{}.exe", std::process::id()))
+}
+
+/// Linux: next to the AppImage, so that the final rename stays on the same file system (atomic).
+#[cfg(target_os = "linux")]
+fn temporary_path(current: &Path) -> PathBuf {
+    let name = current.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    current.with_file_name(format!(".{name}.update-{}", std::process::id()))
+}
+
+/// Linux: the running AppImage is replaced in place (its mount keeps the old inode), then the new one is started.
+#[cfg(target_os = "linux")]
+fn spawn_replacer(current: &Path, new: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Stdio;
+
+    std::fs::set_permissions(new, std::fs::Permissions::from_mode(0o755))
+        .map_err(|error| format!("Не удалось сделать AppImage исполняемым: {error}"))?;
+    std::fs::rename(new, current).map_err(|error| format!("Не удалось заменить AppImage: {error}"))?;
+    let args: Vec<String> = std::env::args().skip(1).filter(|arg| arg == "--play").collect();
+    crate::system::clean_env(&mut std::process::Command::new(current))
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("Обновление установлено, но перезапуск не удался: {error}"))?;
+    Ok(())
 }
 
 #[cfg(windows)]

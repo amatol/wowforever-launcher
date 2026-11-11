@@ -395,6 +395,16 @@ mod imp {
             .unwrap_or(false)
     }
 
+    /// Steam client folder (Proton reads it through STEAM_COMPAT_CLIENT_INSTALL_PATH).
+    fn steam_root() -> std::path::PathBuf {
+        [home().join(".local/share/Steam"), home().join(".steam/steam"), home().join(".steam/root")]
+            .into_iter()
+            .find(|p| p.is_dir())
+            .unwrap_or_else(|| home().join(".local/share/Steam"))
+    }
+
+    /// A Proton when there is one (SteamOS has no wine and no umu-run: Proton is then started directly),
+    /// else the system wine.
     pub fn default_runner() -> String {
         let protons = list_protons();
         let rank = |n: &str| {
@@ -402,8 +412,8 @@ mod imp {
             (!n.contains("latest"), !n.contains("cachyos"), !(n.contains("ge-proton") || n.contains("proton-ge")))
         };
         match protons.iter().min_by_key(|(n, _)| rank(n)) {
-            Some((_, p)) if which("umu-run") => p.clone(),
-            _ => "wine".into(),
+            Some((_, p)) => p.clone(),
+            None => "wine".into(),
         }
     }
 
@@ -446,28 +456,34 @@ mod imp {
     /// Command that runs a Windows program in the prefix (umu-run + Proton, or wine), with its environment.
     pub fn runner(settings: &Settings) -> Result<(Vec<String>, Vec<(String, String)>), String> {
         let l = &settings.linux;
-        let mut env = vec![("WINEPREFIX".to_string(), l.prefix.clone())];
+        let mut env = Vec::new();
         if let Some(posix) = posix_locale(&settings.locale) {
-            env.push(("LANG".into(), posix.clone()));
-            env.push(("LC_ALL".into(), posix));
+            env.push(("LANG".to_string(), posix.clone()));
+            env.push(("LC_ALL".to_string(), posix));
         }
         std::fs::create_dir_all(&l.prefix).map_err(|e| tf("prefix_error", &[&l.prefix, &e]))?;
         if l.runner == "wine" || l.runner.is_empty() {
             if !which("wine") {
-                return Err(t("wine_not_found").into());
+                return Err(if list_protons().is_empty() { t("no_proton") } else { t("wine_not_found") }.into());
             }
+            env.push(("WINEPREFIX".into(), l.prefix.clone()));
             return Ok((vec!["wine".into()], env));
         }
-        if !which("umu-run") {
-            return Err(t("umu_not_found").into());
-        }
-        if !Path::new(&l.runner).join("proton").is_file() {
+        let proton = Path::new(&l.runner).join("proton");
+        if !proton.is_file() {
             return Err(tf("proton_not_found", &[&l.runner]));
         }
-        env.push(("PROTONPATH".into(), l.runner.clone()));
-        env.push(("GAMEID".into(), "umu-default".into()));
-        env.push(("STORE".into(), "none".into()));
-        Ok((vec!["umu-run".into()], env))
+        if which("umu-run") {
+            env.push(("WINEPREFIX".into(), l.prefix.clone()));
+            env.push(("PROTONPATH".into(), l.runner.clone()));
+            env.push(("GAMEID".into(), "umu-default".into()));
+            env.push(("STORE".into(), "none".into()));
+            return Ok((vec!["umu-run".into()], env));
+        }
+        // SteamOS: Proton from Steam started directly; the Wine prefix is <prefix>/pfx
+        env.push(("STEAM_COMPAT_DATA_PATH".into(), l.prefix.clone()));
+        env.push(("STEAM_COMPAT_CLIENT_INSTALL_PATH".into(), steam_root().to_string_lossy().into_owned()));
+        Ok((vec![proton.to_string_lossy().into_owned(), "run".into()], env))
     }
 
     /// Runs a Windows program (e.g. reg.exe) in the prefix and waits for it.
@@ -497,7 +513,7 @@ mod imp {
         // the client checks the certificate with the Windows root store of its Wine prefix
         if prefix_has_ca(&settings.linux.prefix) {
             (true, t("cert_ok_prefix").into())
-        } else if !Path::new(&settings.linux.prefix).join("system.reg").exists() {
+        } else if !["system.reg", "pfx/system.reg"].iter().any(|r| Path::new(&settings.linux.prefix).join(r).exists()) {
             (false, t("prefix_missing").into())
         } else {
             (false, t("cert_not_in_prefix").into())
@@ -543,6 +559,8 @@ rm -f "$t""#;
             match clean_env(&mut Command::new("pkexec")).args(["sh", "-c", script, "sh", &ip.to_string(), portal]).status() {
                 Ok(s) if s.success() => {}
                 Ok(s) if s.code() == Some(126) => errors.push(t("hosts_refused").to_string()),
+                // 127: no polkit agent (Steam Game Mode) or no password for the user (Steam Deck by default)
+                Ok(s) if s.code() == Some(127) => errors.push(t("hosts_pkexec_unavailable").to_string()),
                 Ok(_) | Err(_) => errors.push(t("hosts_write_failed_pkexec").to_string()),
             }
         }

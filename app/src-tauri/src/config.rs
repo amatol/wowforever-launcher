@@ -38,7 +38,7 @@ impl Default for Server {
     fn default() -> Self {
         Self {
             name: built_in(option_env!("FOREVER_SERVER_NAME"), "Дримворлд Навсегда"),
-            portal: "trinity.actual.battle.net".into(),
+            portal: "trinity.actual.mmolabs.ru".into(),
             address: built_in(option_env!("FOREVER_SERVER_ADDRESS"), "92.42.44.9"),
             bnet_port: 1119,
             rest_port: 8081,
@@ -46,7 +46,7 @@ impl Default for Server {
             public_key: STOCK_PUBLIC_KEY.into(),
             region_group: 8,
             website: built_in(option_env!("FOREVER_WEBSITE"), "https://forever.mmolabs.ru/launcher"),
-            system_ca: false,
+            system_ca: true,
         }
     }
 }
@@ -152,7 +152,8 @@ impl Settings {
         }
         #[cfg(target_os = "linux")]
         {
-            if s.linux.runner.is_empty() {
+            // empty, or "wine" saved on a PC that has no wine (SteamOS): pick a Proton from Steam
+            if s.linux.runner.is_empty() || (s.linux.runner == "wine" && !crate::system::which("wine")) {
                 s.linux.runner = crate::system::default_runner();
             }
             if s.linux.keyboard.is_empty() {
@@ -257,8 +258,7 @@ pub fn default_game_dir() -> String {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let base = std::env::current_exe()
-            .ok()
+        let base = launcher_path()
             .and_then(|exe| exe.parent().map(Path::to_path_buf))
             .unwrap_or_else(home);
         let inside = base
@@ -269,6 +269,21 @@ pub fn default_game_dir() -> String {
         let game = if inside { base } else { base.join("_forever_") };
         game.to_string_lossy().into_owned()
     }
+}
+
+/// The launcher file the player started. Linux AppImage: the .AppImage itself (`$APPIMAGE`), not the binary
+/// inside its temporary mount.
+pub fn launcher_path() -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    if let Some(appimage) = appimage_path() {
+        return Some(appimage);
+    }
+    std::env::current_exe().ok()
+}
+
+#[cfg(target_os = "linux")]
+pub fn appimage_path() -> Option<PathBuf> {
+    std::env::var_os("APPIMAGE").map(PathBuf::from).filter(|p| p.is_file())
 }
 
 #[allow(dead_code)]

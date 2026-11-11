@@ -31,6 +31,26 @@ npm install -g @tauri-apps/cli@2
 npx @tauri-apps/cli@2 build --bundles nsis
 ```
 
+## SteamOS / Steam Deck (AppImage)
+
+Отдельная сборка `Forever-AI-SteamOS.AppImage` (job `linux` в workflow,
+собирается на `ubuntu-22.04`). Свой WebKitGTK лежит внутри AppImage, системный
+WebView не нужен; через Proton запускается только `Wow.exe`.
+
+- Proton берётся из Steam (Библиотека → Инструменты → Proton). Если есть
+  `umu-run` — запуск через него, иначе Proton запускается напрямую
+  (`proton run` с `STEAM_COMPAT_DATA_PATH`). Wine не нужен.
+- Префикс по умолчанию: `~/Games/forever-wow`, CA ставится в него автоматически.
+- Запись в `/etc/hosts` идёт через `pkexec`: на Steam Deck сначала задайте
+  пароль (`passwd` в Konsole) и нажмите «Подготовить» в режиме рабочего стола.
+- Клиент (`_forever_`) ставится рядом с AppImage.
+- Автообновление: `launcher_manifest_linux.json`, публикация —
+  `wowserver/scripts/publish-launcher-steamos.sh`.
+- Для Game Mode: «Добавить стороннюю игру» → AppImage, параметр запуска `--play`.
+
+Локально: `cargo install tauri-cli --version "^2" --locked`, затем
+`cd app && cargo tauri build --bundles appimage`.
+
 ## Настройки
 
 По умолчанию:

@@ -25,4 +25,6 @@
 `dpapi::wine`, `patcher/lin.rs`), но с урезанным UI и без выбора Proton —
 используется Proton из Steam.
 
-Статус: **отложено до запуска основного сервера**.
+Статус: **AppImage собирается** (job `linux` в workflow, запуск Proton из
+Steam без umu/Wine, автообновление через `launcher_manifest_linux.json`).
+Не сделано: урезанный UI под геймпад, проверка на реальном Steam Deck.

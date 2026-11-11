@@ -102,10 +102,12 @@ const MESSAGES: &[(&str, Texts)] = &[
     ("hosts_refused", ["доступ к файлу hosts отклонён", "permission refused for the hosts file", "permiso denegado para el archivo hosts", "permissão recusada para o arquivo hosts"]),
     ("hosts_write_failed", ["не удалось записать hosts: {}", "could not write the hosts file: {}", "no se pudo escribir el archivo hosts: {}", "não foi possível gravar o arquivo hosts: {}"]),
     ("hosts_write_failed_pkexec", ["не удалось записать hosts (pkexec)", "could not write the hosts file (pkexec)", "no se pudo escribir el archivo hosts (pkexec)", "não foi possível gravar o arquivo hosts (pkexec)"]),
+    ("hosts_pkexec_unavailable", ["нет прав администратора для hosts: задайте пароль командой passwd в Konsole и нажмите «Подготовить» в режиме рабочего стола", "no administrator rights for the hosts file: set a password with passwd in Konsole and press Prepare in Desktop Mode", "sin permisos de administrador para hosts: define una contraseña con passwd en Konsole y pulsa Preparar en el modo escritorio", "sem permissão de administrador para o hosts: defina uma senha com passwd no Konsole e clique em Preparar no modo área de trabalho"]),
     ("cert_trust_failed", ["сертификат не доверен: {}", "certificate not trusted: {}", "certificado no aprobado: {}", "certificado não aprovado: {}"]),
     ("prefix_error", ["префикс {}: {}", "prefix {}: {}", "prefijo {}: {}", "prefixo {}: {}"]),
     ("wine_not_found", ["wine не найден", "wine not found", "no se encontró wine", "wine não encontrado"]),
     ("umu_not_found", ["umu-run не найден (пакет umu-launcher)", "umu-run not found (umu-launcher package)", "no se encontró umu-run (paquete umu-launcher)", "umu-run não encontrado (pacote umu-launcher)"]),
+    ("no_proton", ["Proton не найден: установите Proton в Steam (Библиотека → Инструменты → Proton)", "Proton not found: install Proton in Steam (Library → Tools → Proton)", "Proton no encontrado: instala Proton en Steam (Biblioteca → Herramientas → Proton)", "Proton não encontrado: instale o Proton no Steam (Biblioteca → Ferramentas → Proton)"]),
     ("proton_not_found", ["Proton не найден: {}", "Proton not found: {}", "Proton no encontrado: {}", "Proton não encontrado: {}"]),
     ("command_failed", ["{} не удалось: {}", "{} failed: {}", "{} falló: {}", "{} falhou: {}"]),
     // key patcher (journal)
