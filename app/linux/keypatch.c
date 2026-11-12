@@ -135,7 +135,7 @@ static int scan_maps(void) {
         if (sscanf(line, "%llx-%llx %7s", &lo, &hi, perms) != 3) continue;
         if (perms[0] != 'r' || perms[1] != 'w') continue;
         char *path = strchr(line, '/');
-        if (path && (strncmp(path, "/memfd:", 7) == 0 || strstr(path, "[stack]"))) continue;
+        if (path && strstr(path, "[stack]")) continue;
         if (hi <= lo || hi - lo > (1ULL << 31)) continue;
         unsigned long long off = lo;
         while (!found && off < hi) {
