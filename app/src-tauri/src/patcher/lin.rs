@@ -36,9 +36,14 @@ impl Memory for ProcessMemory {
                 let mut f = line.split_whitespace();
                 let range = f.next()?;
                 let perms = f.next()?;
-                let inode = f.nth(2)?;
+                let _offset = f.next()?;
+                let _dev = f.next()?;
+                let _inode = f.next()?;
                 let path = f.next().unwrap_or("");
-                if perms != "rw-p" || inode != "0" || path.starts_with("[v") || path == "[stack]" {
+                // Writable regions only, but both anonymous and file-backed: the client's key store
+                // may live in the image's .data/.bss (file-backed, inode != 0), which the old
+                // `inode == 0` filter skipped. The Windows patcher always saw it.
+                if !perms.starts_with("rw") || path.starts_with("[v") || path == "[stack]" {
                     return None;
                 }
                 let (lo, hi) = range.split_once('-')?;
