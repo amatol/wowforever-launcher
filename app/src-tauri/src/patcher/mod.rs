@@ -133,6 +133,76 @@ impl Patcher {
         found
     }
 
+    /// Same structure as a key store, but the keys are unknown (the client updates the Blizzard
+    /// region keys with a new build). Only the ids 1..12, the flags and the padding are checked;
+    /// the old keys were used as the search needle, which fails after such an update.
+    fn state_structural(&self, mem: &dyn Memory, array: u64) -> State {
+        let Some(raw) = mem.read(array, BLOCK) else { return State::Invalid };
+        if raw.len() != BLOCK {
+            return State::Invalid;
+        }
+        for e in 0..COUNT {
+            let o = e * ENTRY;
+            if u32::from_le_bytes(raw[o..o + 4].try_into().unwrap()) != e as u32 + 1 {
+                return State::Invalid;
+            }
+            let key = &raw[o + 4..o + 36];
+            if key.iter().all(|b| *b == 0) || raw[o + 36] != EXPECTED_FLAGS[e] || raw[o + 38..o + 40] != [0, 0] {
+                return State::Invalid;
+            }
+        }
+        let t = (self.group - 1) * ENTRY + 4;
+        if raw[t..t + 32] == self.new_key { State::Patched } else { State::Original }
+    }
+
+    /// Fallback when the known keys are stale: look for the 12-entry id/flag structure itself.
+    fn find_structural_stores(&self, mem: &dyn Memory) -> Vec<(u64, State)> {
+        let needle = [1u8, 0, 0, 0];
+        let finder = memmem::Finder::new(&needle);
+        let mut found = Vec::new();
+        for (lo, hi) in mem.regions() {
+            let mut off = lo;
+            while off < hi {
+                let take = CHUNK.min((hi - off) as usize);
+                let Some(buf) = mem.read(off, take) else { break };
+                for i in finder.find_iter(&buf) {
+                    if i % 4 != 0 || i + BLOCK > buf.len() {
+                        continue;
+                    }
+                    let array = off + i as u64;
+                    let st = self.state_structural(mem, array);
+                    if st != State::Invalid {
+                        found.push((array, st));
+                    }
+                }
+                if take < CHUNK {
+                    break;
+                }
+                off += (CHUNK - needle.len()) as u64;
+            }
+        }
+        found.sort_by_key(|f| f.0);
+        found.dedup_by_key(|f| f.0);
+        found
+    }
+
+    fn patch_structural(&self, mem: &dyn Memory, array: u64) -> Result<(), String> {
+        let addr = array + ((self.group - 1) * ENTRY + 4) as u64;
+        for _ in 0..20 {
+            match mem.read(addr, 32) {
+                Some(cur) if cur == self.new_key => return Ok(()),
+                Some(_) => {
+                    if !mem.write(addr, &self.new_key) {
+                        return Err(t("write_refused").into());
+                    }
+                    return if self.state_structural(mem, array) == State::Patched { Ok(()) } else { Err(t("verify_failed").into()) };
+                }
+                None => std::thread::sleep(Duration::from_millis(300)),
+            }
+        }
+        Err(t("memory_changed").into())
+    }
+
     fn patch(&self, mem: &dyn Memory, array: u64) -> Result<(), String> {
         let addr = array + ((self.group - 1) * ENTRY + 4) as u64;
         for _ in 0..20 {
@@ -156,6 +226,7 @@ impl Patcher {
                  mut emit: impl FnMut(Event)) {
         let mut store: Option<u64> = None;
         let mut last_switch = Instant::now();
+        let mut last_structural = Instant::now() - Duration::from_secs(10);
         let mut said_waiting = false;
         loop {
             if !mem.alive() {
@@ -194,6 +265,26 @@ impl Patcher {
                 }
             }
             let stores = self.find_stores(mem.as_ref());
+            if stores.is_empty() && last_structural.elapsed() > Duration::from_secs(2) {
+                last_structural = Instant::now();
+                let structural = self.find_structural_stores(mem.as_ref());
+                match structural.as_slice() {
+                    [(array, _)] => match self.patch_structural(mem.as_ref(), *array) {
+                        Ok(()) => {
+                            emit(Event::Log(tf("key_written", &[&self.group])));
+                            emit(Event::Ready);
+                            store = Some(*array);
+                            continue;
+                        }
+                        Err(e) => {
+                            emit(Event::Log(tf("key_write_retry", &[&e])));
+                            continue;
+                        }
+                    },
+                    [] => {}
+                    many => emit(Event::Log(tf("many_key_stores", &[&many.len()]))),
+                }
+            }
             match stores.as_slice() {
                 [(array, st)] => {
                     let res = if *st == State::Patched { Ok(()) } else { self.patch(mem.as_ref(), *array) };
@@ -219,5 +310,48 @@ impl Patcher {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod structural_tests {
+    use super::*;
+
+    struct Mem(std::cell::RefCell<Vec<u8>>);
+    impl Memory for Mem {
+        fn regions(&self) -> Vec<(u64, u64)> { vec![(0x1000, 0x1000 + self.0.borrow().len() as u64)] }
+        fn read(&self, addr: u64, len: usize) -> Option<Vec<u8>> {
+            let start = (addr - 0x1000) as usize;
+            self.0.borrow().get(start..start + len).map(|s| s.to_vec())
+        }
+        fn write(&self, addr: u64, data: &[u8]) -> bool {
+            let start = (addr - 0x1000) as usize;
+            match self.0.borrow_mut().get_mut(start..start + data.len()) {
+                Some(s) => { s.copy_from_slice(data); true }
+                None => false,
+            }
+        }
+        fn alive(&self) -> bool { true }
+        fn pid(&self) -> u32 { 1 }
+    }
+
+    #[test]
+    fn finds_and_patches_a_store_with_unknown_keys() {
+        let mut raw = vec![0u8; BLOCK];
+        for e in 0..COUNT {
+            let o = e * ENTRY;
+            raw[o..o + 4].copy_from_slice(&(e as u32 + 1).to_le_bytes());
+            for k in 0..32 { raw[o + 4 + k] = ((e * 32 + k) % 200 + 1) as u8; }
+            raw[o + 36] = EXPECTED_FLAGS[e];
+        }
+        let mem = Mem(std::cell::RefCell::new(raw));
+        let patcher = Patcher::new("02596F0D0C061A8B30745988FD72C59E29EC367FB0F341F28E0F08D037BAFC69", 8).unwrap();
+        let stores = patcher.find_structural_stores(&mem);
+        assert_eq!(stores, vec![(0x1000, State::Original)]);
+        patcher.patch_structural(&mem, 0x1000).unwrap();
+        assert_eq!(patcher.state_structural(&mem, 0x1000), State::Patched);
+        // the group entry now holds the server key
+        let off = 7 * ENTRY + 4;
+        assert_eq!(&mem.0.borrow()[off..off + 32], &patcher.new_key[..]);
     }
 }

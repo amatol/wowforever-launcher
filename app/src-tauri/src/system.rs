@@ -489,11 +489,15 @@ mod imp {
             env.push(("STORE".into(), "none".into()));
             return Ok((vec!["umu-run".into()], env));
         }
-        // SteamOS: Proton from Steam started directly; the Wine prefix is <prefix>/pfx
+        // SteamOS: Proton from Steam started directly; the Wine prefix is <prefix>/pfx.
+        // `runinprefix` runs wine itself instead of going through the Steam runtime/pressure-vessel:
+        // the game stays a child of the launcher, so /proc/<pid>/mem is writable (Yama ptrace_scope=1)
+        // and the key patcher can reach the client. The runtime also hides the process in its own
+        // namespace on some SteamOS setups.
         env.push(("STEAM_COMPAT_DATA_PATH".into(), l.prefix.clone()));
         env.push(("STEAM_COMPAT_CLIENT_INSTALL_PATH".into(), steam_root().to_string_lossy().into_owned()));
-        let verb = if in_prefix { "runinprefix" } else { "run" };
-        Ok((vec![proton.to_string_lossy().into_owned(), verb.into()], env))
+        let _ = in_prefix;
+        Ok((vec![proton.to_string_lossy().into_owned(), "runinprefix".into()], env))
     }
 
     /// Runs a Windows program (e.g. reg.exe) in the prefix and waits for it.
