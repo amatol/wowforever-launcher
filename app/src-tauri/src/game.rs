@@ -20,7 +20,15 @@ pub fn write_wtf(settings: &Settings) -> Result<(), String> {
     let config = dir.join("Config.wtf");
     let _ = std::fs::remove_file(dir.join("ForeverLauncher.wtf"));
     let text = std::fs::read_to_string(&config).unwrap_or_default();
-    rewrite_values(&config, &text, &[("portal", settings.server.portal.clone())])
+    rewrite_values(&config, &text, &[("portal", settings.server.portal.clone())])?;
+    // Read back: the client must see exactly our portal (a stale/foreign Config.wtf would send it to
+    // the old or the official server).
+    let written = std::fs::read_to_string(&config).map_err(|e| format!("{} : {e}", config.display()))?;
+    let expected = format!("SET portal \"{}\"", settings.server.portal);
+    if !written.lines().any(|line| line.trim_end() == expected) {
+        return Err(tf("wtf_portal", &[&config.display().to_string()]));
+    }
+    Ok(())
 }
 
 fn rewrite_values(path: &Path, text: &str, wanted: &[(&str, String)]) -> Result<(), String> {
@@ -101,7 +109,14 @@ pub fn write_launch_options(settings: &Settings, portal: &str, ticket: &str, gam
     let wine_path = format!("Z:{}", file.to_string_lossy().replace('/', "\\"));
     let res = crate::system::run_in_prefix(settings, &["reg", "import", &wine_path]);
     let _ = std::fs::remove_file(&file);
-    res
+    res?;
+    // Read back: an old CONNECTION_STRING (trinity.actual.battle.net) would send the client to the
+    // old portal or to the official server.
+    let out = crate::system::run_in_prefix_output(settings, &["reg", "query", &format!(r"HKCU\{LAUNCH_OPTIONS}"), "/v", "CONNECTION_STRING"])?;
+    if !out.contains(portal) {
+        return Err(tf("launch_options_write", &[&portal]));
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -141,4 +156,26 @@ pub fn spawn(settings: &Settings) -> Result<Child, String> {
         .current_dir(&settings.game_dir)
         .spawn()
         .map_err(|e| tf("launch_failed", &[&cmd[0], &e]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn writes_the_portal_into_config_wtf() {
+        let dir = std::env::temp_dir().join(format!("forever-wtf-test-{}", std::process::id()));
+        let game = dir.join("_forever_");
+        std::fs::create_dir_all(game.join("WTF")).unwrap();
+        std::fs::write(game.join("WTF/Config.wtf"), "SET portal \"trinity.actual.battle.net\"\r\nSET gxApi \"D3D11\"\r\n").unwrap();
+        let mut settings = Settings::default();
+        settings.game_dir = game.to_string_lossy().into_owned();
+        settings.server.portal = "trinity.actual.mmolabs.ru".into();
+        write_wtf(&settings).unwrap();
+        let text = std::fs::read_to_string(game.join("WTF/Config.wtf")).unwrap();
+        assert!(text.contains("SET portal \"trinity.actual.mmolabs.ru\""));
+        assert!(!text.contains("trinity.actual.battle.net"));
+        assert!(text.contains("SET gxApi \"D3D11\""));
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

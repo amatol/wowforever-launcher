@@ -371,6 +371,7 @@ async fn start(app: &AppHandle, settings: Settings) -> Result<(), String> {
     })
     .await
     .map_err(|e| e.to_string())??;
+    emit(app, "log", format!("Портал: {}", settings.server.portal));
     launch(app, settings).await
 }
 
@@ -465,6 +466,15 @@ fn wait_for_client(child_pid: u32) -> Option<patcher::ProcessMemory> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Linux: the old launcher left `92.42.44.9 trinity.actual.battle.net` in /etc/hosts. With the
+    // DNS portal (trinity.actual.mmolabs.ru) that entry only makes old clients fail TLS; remove it
+    // once, outside Steam Game Mode (no polkit agent there).
+    #[cfg(target_os = "linux")]
+    std::thread::spawn(|| {
+        if std::env::var_os("SteamGameId").is_none() {
+            let _ = system::cleanup_legacy_hosts();
+        }
+    });
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())

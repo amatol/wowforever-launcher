@@ -455,6 +455,15 @@ mod imp {
 
     /// Command that runs a Windows program in the prefix (umu-run + Proton, or wine), with its environment.
     pub fn runner(settings: &Settings) -> Result<(Vec<String>, Vec<(String, String)>), String> {
+        runner_inner(settings, false)
+    }
+
+    /// Command for a tool inside the prefix (`reg`, `winecfg`...). Proton: `runinprefix`, not `run`.
+    fn prefix_runner(settings: &Settings) -> Result<(Vec<String>, Vec<(String, String)>), String> {
+        runner_inner(settings, true)
+    }
+
+    fn runner_inner(settings: &Settings, in_prefix: bool) -> Result<(Vec<String>, Vec<(String, String)>), String> {
         let l = &settings.linux;
         let mut env = Vec::new();
         if let Some(posix) = posix_locale(&settings.locale) {
@@ -483,16 +492,22 @@ mod imp {
         // SteamOS: Proton from Steam started directly; the Wine prefix is <prefix>/pfx
         env.push(("STEAM_COMPAT_DATA_PATH".into(), l.prefix.clone()));
         env.push(("STEAM_COMPAT_CLIENT_INSTALL_PATH".into(), steam_root().to_string_lossy().into_owned()));
-        Ok((vec![proton.to_string_lossy().into_owned(), "run".into()], env))
+        let verb = if in_prefix { "runinprefix" } else { "run" };
+        Ok((vec![proton.to_string_lossy().into_owned(), verb.into()], env))
     }
 
     /// Runs a Windows program (e.g. reg.exe) in the prefix and waits for it.
     pub fn run_in_prefix(settings: &Settings, args: &[&str]) -> Result<(), String> {
-        let (cmd, env) = runner(settings)?;
+        run_in_prefix_output(settings, args).map(|_| ())
+    }
+
+    /// Same as `run_in_prefix`, with the program's stdout (used to read the registry back).
+    pub fn run_in_prefix_output(settings: &Settings, args: &[&str]) -> Result<String, String> {
+        let (cmd, env) = prefix_runner(settings)?;
         let out = clean_env(&mut Command::new(&cmd[0])).args(&cmd[1..]).args(args).envs(env).output()
             .map_err(|e| format!("{} : {e}", cmd[0]))?;
         if out.status.success() {
-            Ok(())
+            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
         } else {
             let err = String::from_utf8_lossy(&out.stderr);
             Err(tf("command_failed", &[&args.first().unwrap_or(&""), &err.chars().rev().take(300).collect::<String>().chars().rev().collect::<String>()]))
@@ -538,6 +553,31 @@ mod imp {
         run_in_prefix(settings, &["reg", "add", &key, "/v", "Blob", "/t", "REG_BINARY", "/d", &hex::encode_upper(blob), "/f"])
     }
 
+    /// Old launcher (1.3.3 and older) added this portal to /etc/hosts and trusted its private CA.
+    /// With the DNS scheme the certificate is for trinity.actual.mmolabs.ru, so a stale entry makes a
+    /// client that still uses the old name fail the TLS handshake. Remove it, best effort.
+    pub fn cleanup_legacy_hosts() -> Result<bool, String> {
+        const LEGACY: &str = "trinity.actual.battle.net";
+        let Ok(text) = std::fs::read_to_string("/etc/hosts") else { return Ok(false) };
+        let present = text.lines().any(|line| {
+            line.split('#').next().unwrap_or("").split_whitespace().skip(1).any(|host| host.eq_ignore_ascii_case(LEGACY))
+        });
+        if !present {
+            return Ok(false);
+        }
+        let script = r#"set -e
+t=$(mktemp)
+awk -v h="$1" '{ line=$0; sub(/#.*/, "", line); n=split(line, f, /[ \t]+/); keep=1; for (i=2; i<=n; i++) if (f[i]==h) keep=0; if (keep) print $0 }' /etc/hosts > "$t"
+cat "$t" > /etc/hosts
+rm -f "$t""#;
+        match clean_env(&mut Command::new("pkexec")).args(["sh", "-c", script, "sh", LEGACY]).status() {
+            Ok(s) if s.success() => Ok(true),
+            Ok(s) if s.code() == Some(126) => Err(t("hosts_refused").into()),
+            Ok(s) if s.code() == Some(127) => Err(t("hosts_pkexec_unavailable").into()),
+            Ok(_) | Err(_) => Err(t("hosts_write_failed_pkexec").into()),
+        }
+    }
+
     pub fn repair(settings: &Settings) -> Result<(), String> {
         let mut errors = Vec::new();
         let ip = server_ip(&settings.server)?;
@@ -545,8 +585,12 @@ mod imp {
         if !valid_portal(portal) {
             return Err(t("bad_portal").into());
         }
-        if settings.server.system_ca && portal_resolves_to(portal) == Some(ip) {
-            return Ok(());
+        if settings.server.system_ca {
+            // DNS scheme: remove the hosts/CA leftovers of the old private-CA setup.
+            if let Err(e) = cleanup_legacy_hosts() {
+                errors.push(e);
+            }
+            return if errors.is_empty() { Ok(()) } else { Err(errors.join(" ; ")) };
         }
         if portal_resolves_to(portal) != Some(ip) {
             // /etc/hosts through pkexec; arguments are passed separately, never interpolated into the script
