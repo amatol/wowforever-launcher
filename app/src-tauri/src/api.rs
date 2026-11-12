@@ -147,7 +147,10 @@ pub struct NewsItem {
     pub image: String,
     #[serde(default)]
     pub date: String,
-    /// Short summary shown under the title of the latest post.
+    /// Short teaser for the main screen.
+    #[serde(default)]
+    pub summary: String,
+    /// Full post, opened in the launcher window.
     #[serde(default)]
     pub text: String,
 }

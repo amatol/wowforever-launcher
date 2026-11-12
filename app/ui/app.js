@@ -739,10 +739,20 @@ $('save-settings').addEventListener('click', async () => {
 
 // ------------------------------------------------------------------------------------------------ news
 // shown until the website has a blog (<website>/api/news)
-const defaultNews = () => [1, 2, 3].map((i) => ({ tag: t(`news${i}Tag`), title: t(`news${i}`), image: '', url: 'https://t.me/amatol_blog' }));
+const defaultNews = () => [1, 2, 3].map((i) => ({ tag: t(`news${i}Tag`), title: t(`news${i}`), image: '', summary: '', text: '' }));
+let newsItems = [];
+let newsIndex = -1;   // the post open in the news window, -1 = list
 
-function openLink(url) {
-  if (url) window.__TAURI__.opener.openUrl(url);
+function newsDate(value) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value));
+  if (!m) return '';
+  return new Date(+m[1], m[2] - 1, +m[3]).toLocaleDateString(lang, { day: 'numeric', month: 'long', year: 'numeric' });
+}
+
+// teaser for the main screen: the explicit summary, else the first paragraph of the post
+function newsSummary(n) {
+  if (n.summary) return n.summary;
+  return String(n.text || '').split(/\n\s*\n/)[0].trim();
 }
 
 async function refreshNews() {
@@ -753,14 +763,12 @@ async function refreshNews() {
     console.debug('news:', e);
   }
   const fromSite = items.length > 0;
-  if (!fromSite) items = defaultNews();
-  // the newest post (Rust sorts by date) is the large block, the next ones are the cards below
-  const [latest, ...older] = items;
+  newsItems = fromSite ? items : defaultNews();
+  const [latest, ...older] = newsItems;
   renderHero(latest);
   const cards = older.slice(0, 3);
   $('news-box').hidden = cards.length === 0;
-  $('news-more').hidden = !fromSite;
-  $('news-more').onclick = (ev) => { ev.preventDefault(); openLink('https://t.me/amatol_blog'); };
+  $('news-more').hidden = newsItems.length < 2;
   $('news').replaceChildren(...cards.map((n) => {
     const card = document.createElement('button');
     card.className = 'news-card';
@@ -785,33 +793,26 @@ async function refreshNews() {
     if (n.date) {
       const date = document.createElement('span');
       date.className = 'date';
-      date.textContent = formatDate(n.date);
+      date.textContent = newsDate(n.date);
       body.append(date);
     }
     card.append(img, body);
-    card.addEventListener('click', () => openLink(n.url || 'https://t.me/amatol_blog'));
+    card.addEventListener('click', () => openNewsItem(newsItems.indexOf(n)));
     return card;
   }));
-}
-
-// "2026-11-09" -> "9 ноября 2026" in the launcher language; anything else is shown as is
-function formatDate(value) {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value));
-  if (!m) return value;
-  return new Date(+m[1], m[2] - 1, +m[3]).toLocaleDateString(lang, { day: 'numeric', month: 'long', year: 'numeric' });
 }
 
 function renderHero(n) {
   const hero = $('hero');
   hero.hidden = !n;
   if (!n) return;
-  const url = n.url || 'https://t.me/amatol_blog';
   $('hero-tag').textContent = n.tag || t('newsTag');
-  $('hero-date').textContent = n.date ? formatDate(n.date) : '';
+  $('hero-date').textContent = n.date ? newsDate(n.date) : '';
   $('hero-title').textContent = n.title;
-  $('hero-text').textContent = n.text || '';
-  $('hero-text').hidden = !n.text;
-  $('hero-more').hidden = !url;
+  const teaser = newsSummary(n);
+  $('hero-text').textContent = teaser;
+  $('hero-text').hidden = !teaser;
+  $('hero-more').hidden = false;
   const media = $('hero-media');
   media.replaceChildren();
   if (n.image) {
@@ -821,8 +822,110 @@ function renderHero(n) {
     img.onerror = () => img.remove();
     media.append(img);
   }
-  hero.onclick = () => openLink(url);
+  hero.onclick = () => openNewsItem(0);
 }
+
+// ------------------------------------------------------------------------------------------------ news window
+function newsMeta(n) {
+  const meta = document.createElement('div');
+  meta.className = 'news-window-meta';
+  const tag = document.createElement('span');
+  tag.className = 'tag';
+  tag.textContent = n.tag || t('newsTag');
+  meta.append(tag);
+  if (n.date) {
+    const date = document.createElement('span');
+    date.className = 'date';
+    date.textContent = newsDate(n.date);
+    meta.append(date);
+  }
+  return meta;
+}
+
+function openNewsWindow() {
+  $('news-view').hidden = false;
+  document.body.classList.add('news-open');
+}
+
+function closeNews() {
+  $('news-view').hidden = true;
+  document.body.classList.remove('news-open');
+  newsIndex = -1;
+}
+
+function openNewsItem(index) {
+  const n = newsItems[index];
+  if (!n) return openNewsList();
+  newsIndex = index;
+  const body = $('news-view-body');
+  const article = document.createElement('article');
+  article.className = 'news-window-post';
+  const title = document.createElement('h2');
+  title.id = 'news-view-title';
+  title.textContent = n.title;
+  article.append(newsMeta(n), title);
+  if (n.image) {
+    const img = document.createElement('img');
+    img.src = n.image;
+    img.alt = '';
+    img.onerror = () => img.remove();
+    article.append(img);
+  }
+  const text = String(n.text || n.summary || '').trim();
+  if (text) {
+    const content = document.createElement('div');
+    content.className = 'news-window-text';
+    // blank lines separate paragraphs, single line breaks stay inside a paragraph
+    text.split(/\n\s*\n/).forEach((part) => {
+      const p = document.createElement('p');
+      p.textContent = part;
+      content.append(p);
+    });
+    article.append(content);
+  }
+  body.replaceChildren(article);
+  body.scrollTop = 0;
+  $('news-back').hidden = newsItems.length < 2;
+  openNewsWindow();
+}
+
+function openNewsList() {
+  newsIndex = -1;
+  const body = $('news-view-body');
+  const list = document.createElement('div');
+  list.className = 'news-window-list';
+  const title = document.createElement('h2');
+  title.id = 'news-view-title';
+  title.textContent = t('allNews');
+  list.append(title);
+  newsItems.forEach((n, i) => {
+    const row = document.createElement('button');
+    row.className = 'news-row';
+    row.type = 'button';
+    const head = newsMeta(n);
+    const name = document.createElement('strong');
+    name.textContent = n.title;
+    const teaser = document.createElement('span');
+    teaser.className = 'news-row-text';
+    teaser.textContent = newsSummary(n);
+    row.append(head, name);
+    if (teaser.textContent) row.append(teaser);
+    row.addEventListener('click', () => openNewsItem(i));
+    list.append(row);
+  });
+  body.replaceChildren(list);
+  body.scrollTop = 0;
+  $('news-back').hidden = true;
+  openNewsWindow();
+}
+
+$('news-more').addEventListener('click', (ev) => { ev.preventDefault(); openNewsList(); });
+$('news-close').addEventListener('click', closeNews);
+$('news-back').addEventListener('click', openNewsList);
+$('news-view').addEventListener('click', (ev) => { if (ev.target === $('news-view')) closeNews(); });
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape' && !$('news-view').hidden) closeNews();
+});
 
 // ------------------------------------------------------------------------------------------------ background
 function rotateBackground() {

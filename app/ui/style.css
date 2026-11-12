@@ -251,6 +251,48 @@ input:focus, select:focus { outline: none; border-color: var(--blue); box-shadow
 }
 .hero .btn { margin-top: 4px; }
 
+/* reading a post inside the launcher */
+.news-view {
+  position: fixed; inset: 0; z-index: 30;
+  display: grid; place-items: center; padding: 40px 24px;
+  background: rgba(3, 5, 12, 0.72); backdrop-filter: blur(5px);
+  animation: fade 0.2s ease;
+}
+.news-window {
+  display: flex; flex-direction: column; width: min(720px, 100%); max-height: min(78vh, 600px);
+  background: var(--glass-2); border: 1px solid var(--line-2); border-radius: 10px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.6);
+  animation: fade 0.22s ease;
+}
+.news-window-head {
+  display: flex; align-items: center; gap: 6px; padding: 10px 10px 10px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.news-window-head .label { flex: 1; color: var(--gold); }
+.news-window-head #news-back { justify-self: start; font-size: 18px; }
+.news-window-body { overflow: auto; padding: 18px 24px 24px; user-select: text; }
+.news-window-body h2 { margin: 4px 0 14px; font: 700 25px/1.25 Georgia, "Times New Roman", serif; color: #fff7e0; }
+.news-window-meta { display: flex; align-items: center; gap: 10px; }
+.news-window-meta .tag { font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: #8cc8ff; }
+.news-window-meta .date { font-size: 12px; color: var(--muted); }
+.news-window-post > img {
+  width: 100%; max-height: 260px; object-fit: cover; display: block;
+  margin-bottom: 16px; border-radius: 6px; background: #141a30;
+}
+.news-window-text p { margin: 0 0 12px; font-size: 14px; line-height: 1.65; color: rgba(241, 239, 232, 0.9); white-space: pre-line; }
+.news-window-text p:last-child { margin-bottom: 0; }
+.news-window-list { display: grid; gap: 2px; }
+.news-window-list h2 { margin-bottom: 10px; }
+.news-row {
+  display: grid; gap: 4px; width: 100%; padding: 12px 10px; text-align: left; cursor: pointer;
+  font: inherit; color: inherit; background: transparent; border: 0; border-bottom: 1px solid var(--line);
+  border-radius: 4px;
+}
+.news-row:last-child { border-bottom: 0; }
+.news-row:hover { background: rgba(255, 255, 255, 0.06); }
+.news-row strong { font-size: 15px; line-height: 1.3; }
+.news-row-text { font-size: 12.5px; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+
 /* journal popover above the play button */
 .log {
   position: absolute; left: 330px; bottom: 40px; width: min(440px, 40vw);
