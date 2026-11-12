@@ -14,11 +14,13 @@
 #define CHUNK (1024 * 1024)
 #define MAX_CLIENTS 16
 #define MAX_OWNED 256
+#define MAX_CANDIDATES 128
 
 static FILE *log_file;
 static uint8_t keys[KEY_COUNT][32], replacement[32];
 static unsigned group;
 static ULONGLONG last_heartbeat;
+static ULONGLONG started_tick;
 static DWORD owned[MAX_OWNED];
 static size_t owned_count;
 
@@ -33,7 +35,11 @@ static void record(const char *kind, const char *fmt, ...) {
     va_start(args, fmt);
     vfprintf(log_file, fmt, args);
     va_end(args);
-    fputc('\n', log_file);
+    SYSTEMTIME utc;
+    GetSystemTime(&utc);
+    fprintf(log_file, " t_ms=%llu utc=%04u-%02u-%02uT%02u:%02u:%02u.%03uZ\n",
+            (unsigned long long)(GetTickCount64() - started_tick),
+            utc.wYear, utc.wMonth, utc.wDay, utc.wHour, utc.wMinute, utc.wSecond, utc.wMilliseconds);
     fflush(log_file);
 }
 
@@ -60,18 +66,30 @@ static int state_at(HANDLE process, uintptr_t address) {
     return keystore_state(raw, sizeof raw, keys, replacement, group);
 }
 
+static int writable(DWORD protect);
+
 static int patch_store(HANDLE process, uintptr_t address) {
     /* Revalidate the entire store immediately before writing. Never change protection. */
     int state = state_at(process, address);
     if (state == 2) return 1;
-    if (state != 1) return 0;
+    if (state != 1) { SetLastError(ERROR_INVALID_DATA); return 0; }
     SIZE_T written = 0;
     uintptr_t target = address + (group - 1) * KEY_ENTRY + 4;
-    if (!WriteProcessMemory(process, (void *)target, replacement, 32, &written) || written != 32) {
-        record("WARN", "write failed winerr=%lu", GetLastError());
+    MEMORY_BASIC_INFORMATION info;
+    if (!VirtualQueryEx(process, (void *)target, &info, sizeof info)) return 0;
+    if (info.State != MEM_COMMIT || !writable(info.Protect) ||
+        target < (uintptr_t)info.BaseAddress ||
+        target - (uintptr_t)info.BaseAddress > info.RegionSize ||
+        info.RegionSize - (target - (uintptr_t)info.BaseAddress) < 32) {
+        SetLastError(ERROR_ACCESS_DENIED);
         return 0;
     }
-    return state_at(process, address) == 2;
+    if (!WriteProcessMemory(process, (void *)target, replacement, 32, &written) || written != 32) {
+        return 0;
+    }
+    if (state_at(process, address) == 2) return 1;
+    SetLastError(ERROR_INVALID_DATA);
+    return 0;
 }
 
 typedef struct {
@@ -81,6 +99,11 @@ typedef struct {
     ULONGLONG next_scan;
     ULONGLONG first_seen;
     ULONGLONG next_warning;
+    ULONGLONG next_patch;
+    uintptr_t candidates[MAX_CANDIDATES];
+    size_t candidate_count;
+    size_t confirmed_candidates;
+    int candidate_overflow;
     int ready;
 } Client;
 
@@ -91,11 +114,61 @@ static int writable(DWORD protect) {
            base == PAGE_EXECUTE_READWRITE || base == PAGE_EXECUTE_WRITECOPY;
 }
 
+static void remember_candidate(Client *client, uintptr_t address, const uint8_t *raw) {
+    for (size_t i = 0; i < client->candidate_count; ++i)
+        if (client->candidates[i] == address) return;
+    if (client->candidate_count == MAX_CANDIDATES) {
+        if (!client->candidate_overflow)
+            record("WARN", "pid=%lu candidate index overflow; no write until a complete reindex", client->pid);
+        client->candidate_overflow = 1;
+        return;
+    }
+    client->candidates[client->candidate_count++] = address;
+    unsigned mask = 0;
+    for (unsigned e = 0; e < KEY_COUNT; ++e)
+        if (!memcmp(raw + e * KEY_ENTRY + 4, keys[e], 32)) mask |= 1u << e;
+    record("CANDIDATE", "pid=%lu address=%llx known_mask=%03x", client->pid,
+           (unsigned long long)address, mask);
+}
+
+/* IDs can be present long before the keys are populated. Poll small, previously
+ * indexed candidates rather than waiting for another multi-GB sweep. A shape alone
+ * never permits a write: every key, flag and padding byte is still verified.
+ * Only a completed sweep can make new candidates eligible. Duplicates fail closed. */
+static uintptr_t probe_candidates(Client *client) {
+    if (!client->confirmed_candidates || client->candidate_overflow) return 0;
+    uintptr_t found = 0;
+    size_t matches = 0;
+    int eligible = 0;
+    for (size_t i = 0; i < client->candidate_count; ++i) {
+        if (state_at(client->handle, client->candidates[i])) {
+            found = client->candidates[i];
+            eligible = i < client->confirmed_candidates;
+            ++matches;
+        }
+    }
+    if (matches == 1 && eligible) {
+        record("CACHE_HIT", "pid=%lu address=%llx candidates=%zu", client->pid,
+               (unsigned long long)found, client->candidate_count);
+        return found;
+    }
+    if (matches > 1 && GetTickCount64() >= client->next_warning) {
+        record("WARN", "pid=%lu indexed verified stores=%zu; no write", client->pid, matches);
+        client->next_warning = GetTickCount64() + 15000;
+    }
+    return 0;
+}
+
 static uintptr_t scan(Client *client, uint8_t *buffer) {
-    uintptr_t address = 0, candidate = 0;
+    uintptr_t address = 0;
     size_t matches = 0, shapes = 0, regions = 0, failures = 0;
     unsigned long long bytes = 0;
     ULONGLONG began = GetTickCount64();
+    ULONGLONG last_probe = began;
+    if (client->candidate_overflow) {
+        client->candidate_count = client->confirmed_candidates = 0;
+        client->candidate_overflow = 0;
+    }
     MEMORY_BASIC_INFORMATION info;
     while (live(client->handle) && VirtualQueryEx(client->handle, (void *)address, &info, sizeof info)) {
         uintptr_t lo = (uintptr_t)info.BaseAddress;
@@ -117,14 +190,23 @@ static uintptr_t scan(Client *client, uint8_t *buffer) {
                 i = (size_t)(hit - buffer);
                 if ((off + i) % 4 == 0 && keystore_shape(hit, got - i)) {
                     ++shapes;
+                    remember_candidate(client, off + i, hit);
                     if (keystore_state(hit, got - i, keys, replacement, group)) {
-                        candidate = off + i;
                         ++matches;
                     }
                 }
                 ++i;
             }
             heartbeat();
+            if (GetTickCount64() - last_probe >= 25) {
+                last_probe = GetTickCount64();
+                uintptr_t cached = probe_candidates(client);
+                if (cached) {
+                    record("SCAN_PAUSED", "pid=%lu bytes=%llu ms=%llu reason=verified_cached_store",
+                           client->pid, bytes, (unsigned long long)(GetTickCount64() - began));
+                    return cached;
+                }
+            }
             /* Bound the work per pass as well as the memory allocation. */
             if (GetTickCount64() - began > 10000) {
                 record("WARN", "pid=%lu scan timed out; no write", client->pid);
@@ -140,7 +222,9 @@ static uintptr_t scan(Client *client, uint8_t *buffer) {
     record("SCAN", "pid=%lu regions=%zu bytes=%llu read_failures=%zu known=%zu shapes=%zu ms=%llu",
            client->pid, regions, bytes, failures, matches, shapes,
            (unsigned long long)(GetTickCount64() - began));
-    if (matches != 1) {
+    client->confirmed_candidates = client->candidate_count;
+    uintptr_t candidate = probe_candidates(client);
+    if (!candidate) {
         if ((matches > 1 || GetTickCount64() - client->first_seen >= 15000) &&
             GetTickCount64() >= client->next_warning) {
             record("WARN", "pid=%lu expected one verified key store, found %zu; no write", client->pid, matches);
@@ -197,6 +281,7 @@ int wmain(int argc, wchar_t **argv) {
     if (argc != 5) return 2;
     log_file = _wfopen(argv[1], L"ab");
     if (!log_file) return 3;
+    started_tick = GetTickCount64();
     char key[65];
     size_t key_len = wcslen(argv[3]);
     if (key_len != 64) { record("ERROR", "invalid public key"); return 4; }
@@ -237,6 +322,7 @@ int wmain(int argc, wchar_t **argv) {
     owned[owned_count++] = child.dwProcessId;
     record("PROCESS", "pid=%lu", child.dwProcessId);
     ULONGLONG empty_since = 0;
+    ULONGLONG next_discover = 0;
     DWORD exit_code = 0;
     for (;;) {
         heartbeat();
@@ -250,34 +336,46 @@ int wmain(int argc, wchar_t **argv) {
                 memset(c, 0, sizeof *c);
             }
         }
-        discover(clients, game, started.QuadPart);
+        if (GetTickCount64() >= next_discover) {
+            discover(clients, game, started.QuadPart);
+            next_discover = GetTickCount64() + 500;
+        }
         int active = 0;
         for (int i = 0; i < MAX_CLIENTS; ++i) {
             Client *c = &clients[i];
             if (!c->handle) continue;
             ++active;
-            if (c->store && !state_at(c->handle, c->store)) {
+            int state = c->store ? state_at(c->handle, c->store) : 0;
+            if (c->store && !state) {
                 record("WARN", "pid=%lu key store changed; rescanning", c->pid);
                 c->store = 0;
                 c->ready = 0;
             }
+            if (!c->store) c->store = probe_candidates(c);
             if (!c->store && GetTickCount64() >= c->next_scan) {
                 c->store = scan(c, buffer);
                 /* The store can be allocated during startup, shortly before autologin.
                  * Retry promptly at first; after READY only 480 bytes are polled. */
-                c->next_scan = GetTickCount64() + (GetTickCount64() - c->first_seen < 20000 ? 500 : 5000);
+                c->next_scan = GetTickCount64() + (GetTickCount64() - c->first_seen < 20000 ?
+                    (c->confirmed_candidates ? 2000 : 500) : 5000);
             }
-            if (c->store && state_at(c->handle, c->store) != 2) c->ready = 0;
-            if (c->store && !c->ready && patch_store(c->handle, c->store)) {
-                record("READY", "pid=%lu group=%u address=%llx verified=1", c->pid, group,
-                       (unsigned long long)c->store);
-                c->ready = 1;
+            if (c->store && state != 2) c->ready = 0;
+            if (c->store && !c->ready && GetTickCount64() >= c->next_patch) {
+                c->next_patch = GetTickCount64() + 250;
+                if (patch_store(c->handle, c->store)) {
+                    record("READY", "pid=%lu group=%u address=%llx verified=1", c->pid, group,
+                           (unsigned long long)c->store);
+                    c->ready = 1;
+                } else if (GetTickCount64() >= c->next_warning) {
+                    record("WARN", "pid=%lu key write/verification failed winerr=%lu", c->pid, GetLastError());
+                    c->next_warning = GetTickCount64() + 15000;
+                }
             }
         }
         if (active) empty_since = 0;
         else if (!empty_since) empty_since = GetTickCount64();
         else if (GetTickCount64() - empty_since >= 3000) break;
-        Sleep(250);
+        Sleep(25);
     }
     record("CLOSED", "exit=%lu", exit_code);
     free(buffer);

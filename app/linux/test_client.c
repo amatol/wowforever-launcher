@@ -46,15 +46,39 @@ int main(void) {
     /* The complete store straddles a scan chunk, so overlap is required. */
     volatile uint8_t *raw = allocation + 1024 * 1024 - 240;
     fill((uint8_t *)raw);
+    int late_keys = !strcmp(mode, "late-keys") || !strcmp(mode, "late-duplicate");
+    if (late_keys) {
+        for (unsigned e = 0; e < KEY_COUNT; ++e)
+            memset((uint8_t *)raw + e * KEY_ENTRY + 4, 0, 32);
+    }
     if (!strcmp(mode, "unknown")) raw[4] ^= 1;
     if (!strcmp(mode, "duplicate")) fill(allocation + 128);
+    if (!strcmp(mode, "late-duplicate")) {
+        fill(allocation + 128);
+        for (unsigned e = 0; e < KEY_COUNT; ++e)
+            memset(allocation + 128 + e * KEY_ENTRY + 4, 0, 32);
+    }
+    if (!strcmp(mode, "overflow")) {
+        for (unsigned c = 0; c < 128; ++c) {
+            uint8_t *p = allocation + 128 + c * 512;
+            memset(p, 0, KEY_BLOCK);
+            for (unsigned e = 0; e < KEY_COUNT; ++e) p[e * KEY_ENTRY] = (uint8_t)e + 1;
+        }
+    }
     if (!strcmp(mode, "readonly")) VirtualProtect(allocation, 2 * 1024 * 1024, PAGE_READONLY, &old);
     uint8_t expected[32];
     decode_key("02596F0D0C061A8B30745988FD72C59E29EC367FB0F341F28E0F08D037BAFC69", expected);
-    int should_patch = !strcmp(mode, "valid") || !strcmp(mode, "restore") || !strcmp(mode, "delayed");
+    int should_patch = !strcmp(mode, "valid") || !strcmp(mode, "restore") || !strcmp(mode, "delayed") || !strcmp(mode, "late-keys");
     int seen = 0, restored = 0;
     ULONGLONG start = GetTickCount64();
-    while (GetTickCount64() - start < 8000) {
+    ULONGLONG filled_at = 0;
+    while (GetTickCount64() - start < (late_keys ? 28000 : 8000)) {
+        /* IDs exist early, keys arrive after the scanner's startup/backoff period. */
+        if (late_keys && !filled_at && GetTickCount64() - start >= 22000) {
+            fill((uint8_t *)raw);
+            if (!strcmp(mode, "late-duplicate")) fill(allocation + 128);
+            filled_at = GetTickCount64();
+        }
         int patched = !memcmp((const void *)(raw + 7 * KEY_ENTRY + 4), expected, 32);
         if (patched) {
             seen = 1;
@@ -64,6 +88,15 @@ int main(void) {
                 decode_key(known_keys[7], (uint8_t *)raw + 7 * KEY_ENTRY + 4);
                 restored = 1;
             } else {
+                if (late_keys && GetTickCount64() - filled_at > 500) {
+                    result("FIXTURE FAIL late keys were not patched within 500ms"); return 16;
+                }
+                if (late_keys) {
+                    char message[96];
+                    snprintf(message, sizeof message, "FIXTURE PASS late_keys_latency_ms=%llu",
+                             (unsigned long long)(GetTickCount64() - filled_at));
+                    result(message);
+                }
                 result("FIXTURE PASS patched and verified");
                 return 0;
             }

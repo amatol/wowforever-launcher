@@ -28,12 +28,13 @@ def build(source, target, unicode=False):
 
 
 helper = ROOT / "forever-keypatch.exe"
-build(HERE / "keypatch.c", helper, unicode=True)
+build(Path(os.environ.get("HELPER_SOURCE", str(HERE / "keypatch.c"))), helper, unicode=True)
 env = dict(os.environ, STEAM_COMPAT_DATA_PATH=str(ROOT / "prefix"),
            STEAM_COMPAT_CLIENT_INSTALL_PATH=str(ROOT / "steam"), WINEDEBUG="-all")
 (ROOT / "prefix").mkdir()
 (ROOT / "steam").mkdir()
-for mode in ("valid", "delayed", "restore", "unknown", "duplicate", "readonly", "respawn", "unrelated"):
+modes = os.environ.get("FOREVER_TEST_MODES", "valid,delayed,late-keys,late-duplicate,overflow,restore,unknown,duplicate,readonly,respawn,unrelated").split(",")
+for mode in modes:
     game_dir = ROOT / (mode + " Игра с пробелами")
     game_dir.mkdir()
     game = game_dir / "Wow.exe"
@@ -62,10 +63,12 @@ for mode in ("valid", "delayed", "restore", "unknown", "duplicate", "readonly", 
     result = (game_dir / "fixture-result.txt").read_text()
     assert "FIXTURE PASS" in result and "FIXTURE FAIL" not in result, (mode, result)
     ready = sum(line.startswith("READY ") for line in text.splitlines())
-    assert ready == (2 if mode == "restore" else 1 if mode in ("valid", "delayed", "respawn", "unrelated") else 0), (mode, text)
+    assert ready == (2 if mode == "restore" else 1 if mode in ("valid", "delayed", "late-keys", "respawn", "unrelated") else 0), (mode, text)
     if mode == "unrelated":
         assert "FIXTURE PASS no speculative write" in result, result
     print(f"PASS {mode}: READY={ready}", flush=True)
+    if mode == "late-keys":
+        print(result.strip(), flush=True)
 
 for name, game, key, group in (("missing", ROOT / "missing.exe", KEY, "8"),
                                ("bad-key", ROOT / "missing.exe", "Z" + KEY[1:], "8"),
