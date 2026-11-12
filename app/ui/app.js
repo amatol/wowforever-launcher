@@ -754,9 +754,14 @@ async function refreshNews() {
   }
   const fromSite = items.length > 0;
   if (!fromSite) items = defaultNews();
+  // the newest post (Rust sorts by date) is the large block, the next ones are the cards below
+  const [latest, ...older] = items;
+  renderHero(latest);
+  const cards = older.slice(0, 3);
+  $('news-box').hidden = cards.length === 0;
   $('news-more').hidden = !fromSite;
   $('news-more').onclick = (ev) => { ev.preventDefault(); openLink('https://t.me/amatol_blog'); };
-  $('news').replaceChildren(...items.slice(0, 3).map((n) => {
+  $('news').replaceChildren(...cards.map((n) => {
     const card = document.createElement('button');
     card.className = 'news-card';
     card.type = 'button';
@@ -780,13 +785,43 @@ async function refreshNews() {
     if (n.date) {
       const date = document.createElement('span');
       date.className = 'date';
-      date.textContent = n.date;
+      date.textContent = formatDate(n.date);
       body.append(date);
     }
     card.append(img, body);
     card.addEventListener('click', () => openLink(n.url || 'https://t.me/amatol_blog'));
     return card;
   }));
+}
+
+// "2026-11-09" -> "9 ноября 2026" in the launcher language; anything else is shown as is
+function formatDate(value) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value));
+  if (!m) return value;
+  return new Date(+m[1], m[2] - 1, +m[3]).toLocaleDateString(lang, { day: 'numeric', month: 'long', year: 'numeric' });
+}
+
+function renderHero(n) {
+  const hero = $('hero');
+  hero.hidden = !n;
+  if (!n) return;
+  const url = n.url || 'https://t.me/amatol_blog';
+  $('hero-tag').textContent = n.tag || t('newsTag');
+  $('hero-date').textContent = n.date ? formatDate(n.date) : '';
+  $('hero-title').textContent = n.title;
+  $('hero-text').textContent = n.text || '';
+  $('hero-text').hidden = !n.text;
+  $('hero-more').hidden = !url;
+  const media = $('hero-media');
+  media.replaceChildren();
+  if (n.image) {
+    const img = document.createElement('img');
+    img.src = n.image;
+    img.alt = '';
+    img.onerror = () => img.remove();
+    media.append(img);
+  }
+  hero.onclick = () => openLink(url);
 }
 
 // ------------------------------------------------------------------------------------------------ background

@@ -67,6 +67,17 @@
 
     <!-- play -->
     <section class="view view-play" id="view-play" hidden>
+      <!-- latest post, filled by refreshNews() -->
+      <article class="hero" id="hero" hidden>
+        <div class="hero-media" id="hero-media"></div>
+        <div class="hero-body">
+          <div class="hero-meta"><span class="hero-badge" data-i18n="latestNews">Latest news</span><span class="tag" id="hero-tag"></span><span class="date" id="hero-date"></span></div>
+          <h1 id="hero-title"></h1>
+          <p id="hero-text" hidden></p>
+          <button class="btn small" id="hero-more" type="button" data-i18n="readMore" hidden>Read more</button>
+        </div>
+      </article>
+
       <div class="launch">
         <span class="label" data-i18n="versionRealm">Game version &amp; realm</span>
         <div class="field" id="game-field">WoW Forever</div>
@@ -82,7 +93,7 @@
         <p class="version"><span id="version"></span> · <a href="#" id="toggle-log" data-i18n="journal">Log</a></p>
       </div>
 
-      <div class="news">
+      <div class="news" id="news-box" hidden>
         <div class="news-head">
           <span class="label" data-i18n="news">News</span>
           <a href="#" id="news-more" data-i18n="seeAll" hidden>See all</a>

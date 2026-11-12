@@ -147,6 +147,9 @@ pub struct NewsItem {
     pub image: String,
     #[serde(default)]
     pub date: String,
+    /// Short summary shown under the title of the latest post.
+    #[serde(default)]
+    pub text: String,
 }
 
 /// Новости сервера из статического news.json (публичный сертификат). Относительные ссылки делаются абсолютными.
@@ -165,6 +168,8 @@ pub async fn news(website: &str) -> Result<Vec<NewsItem>> {
             }
         }
     }
+    // newest first; ISO dates (YYYY-MM-DD) sort as strings, the file order is kept for equal dates
+    items.sort_by(|a, b| b.date.cmp(&a.date));
     Ok(items)
 }
 

@@ -4,7 +4,8 @@
 
 - Windows-лаунчер Forever AI (Tauri, NSIS).
 - hosts + публичный CA + LoginREST + автовход + ключ сервера.
-- Новости из `https://forever.mmolabs.ru/launcher/news.json`.
+- Новости из `https://forever.mmolabs.ru/launcher/news.json`: свежая новость
+  блоком на главном экране, ещё три — карточками внизу.
 
 ## Следующий этап: SteamOS / Steam Deck
 
