@@ -1,6 +1,6 @@
 [package]
 name = "forever-ai-launcher"
-version = "1.4.6"
+version = "1.4.7"
 description = "Дримворлд Навсегда - лаунчер WoW Forever (TrinityCore)"
 edition = "2021"
 publish = false

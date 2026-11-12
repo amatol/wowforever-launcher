@@ -397,7 +397,36 @@ async fn launch(app: &AppHandle, settings: Settings) -> Result<(), String> {
 }
 
 /// Windows, Linux: the game is started, then the patcher writes the key into its memory.
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+async fn launch(app: &AppHandle, settings: Settings) -> Result<(), String> {
+    emit(app, "step", t("step_launching"));
+    let mut child = game::spawn(&settings)?;
+    let log = game::keypatch_log_path();
+    let app = app.clone();
+    std::thread::spawn(move || {
+        emit(&app, "running", t("running"));
+        let mut ready = false;
+        loop {
+            if !ready {
+                if let Ok(text) = std::fs::read_to_string(&log) {
+                    if text.contains("server key written") {
+                        emit(&app, "ready", t("ready"));
+                        ready = true;
+                    }
+                }
+            }
+            match child.try_wait() {
+                Ok(Some(_)) | Err(_) => break,
+                Ok(None) => std::thread::sleep(Duration::from_millis(250)),
+            }
+        }
+        emit(&app, "closed", t("closed"));
+        app.state::<AppState>().playing.store(false, Ordering::SeqCst);
+    });
+    Ok(())
+}
+
+#[cfg(windows)]
 async fn launch(app: &AppHandle, settings: Settings) -> Result<(), String> {
     emit(app, "step", t("step_launching"));
     let patcher = patcher::Patcher::new(&settings.server.public_key, settings.server.region_group)?;
@@ -437,18 +466,18 @@ async fn launch(app: &AppHandle, settings: Settings) -> Result<(), String> {
 
 use tauri::Manager;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
 fn other_pid(m: &patcher::ProcessMemory) -> u32 {
     use patcher::Memory;
     m.pid()
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
 fn current_rss(m: &dyn patcher::Memory) -> u64 {
     patcher::ProcessMemory::open(m.pid()).map(|p| p.rss()).unwrap_or(0)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
 fn wait_for_client(child_pid: u32) -> Option<patcher::ProcessMemory> {
     #[cfg(windows)]
     if let Some(m) = patcher::ProcessMemory::open(child_pid) {

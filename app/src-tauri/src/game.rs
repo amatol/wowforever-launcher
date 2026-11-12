@@ -128,12 +128,40 @@ pub fn spawn(settings: &Settings) -> Result<Child, String> {
         .map_err(|e| tf("launch_failed", &[&"Wow.exe", &e]))
 }
 
+/// LD_PRELOAD library that patches the client's key store from inside its Wine process.
+#[cfg(target_os = "linux")]
+const KEYPATCH_SO: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libforever_keypatch.so"));
+
+#[cfg(target_os = "linux")]
+pub fn keypatch_log_path() -> std::path::PathBuf {
+    crate::config::config_dir().join("keypatch.log")
+}
+
+#[cfg(target_os = "linux")]
+fn install_keypatch() -> Result<std::path::PathBuf, String> {
+    use std::os::unix::fs::PermissionsExt;
+    let path = crate::config::config_dir().join("libforever_keypatch.so");
+    if std::fs::read(&path).ok().as_deref() != Some(KEYPATCH_SO) {
+        std::fs::create_dir_all(crate::config::config_dir()).map_err(|e| e.to_string())?;
+        std::fs::write(&path, KEYPATCH_SO).map_err(|e| format!("{} : {e}", path.display()))?;
+    }
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
 #[cfg(target_os = "linux")]
 pub fn spawn(settings: &Settings) -> Result<Child, String> {
     let (runner, mut env) = crate::system::runner(settings)?;
     let mut cmd: Vec<String> = runner;
     cmd.push(settings.exe().to_string_lossy().into_owned());
     cmd.push("-launcherlogin".into());
+    let keypatch = install_keypatch()?;
+    let keypatch_log = keypatch_log_path();
+    let _ = std::fs::remove_file(&keypatch_log);
+    env.push(("LD_PRELOAD".into(), keypatch.to_string_lossy().into_owned()));
+    env.push(("FOREVER_SERVER_KEY".into(), settings.server.public_key.clone()));
+    env.push(("FOREVER_REGION_GROUP".into(), settings.server.region_group.to_string()));
+    env.push(("FOREVER_PATCH_LOG".into(), keypatch_log.to_string_lossy().into_owned()));
     let l = &settings.linux;
     if l.gamescope && crate::system::which("gamescope") {
         // gamescope starts its own Xwayland with a US keyboard unless told otherwise

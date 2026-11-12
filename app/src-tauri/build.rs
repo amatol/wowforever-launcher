@@ -33,10 +33,28 @@ fn embed_ca() {
     std::fs::write(out, pem.trim().to_string() + "\n").unwrap();
 }
 
+/// Linux/SteamOS: LD_PRELOAD library that patches the client's key store from inside the game
+/// process (no ptrace/pressure-vessel restrictions).
+fn build_keypatch_linux() {
+    let src = "../linux/keypatch.c";
+    println!("cargo:rerun-if-changed={src}");
+    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("libforever_keypatch.so");
+    let status = Command::new("cc")
+        .args(["-shared", "-fPIC", "-O2", "-pthread", "-o"])
+        .arg(&out)
+        .arg(src)
+        .status()
+        .expect("cc not found (install build-essential)");
+    assert!(status.success(), "building {src} failed");
+}
+
 fn main() {
     embed_ca();
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         build_keypatch();
+    }
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+        build_keypatch_linux();
     }
     // FOREVER_CHECK_ONLY=1: lets `cargo check --target x86_64-pc-windows-gnu` run on Linux without the Windows
     // resource compiler (real builds never set it)

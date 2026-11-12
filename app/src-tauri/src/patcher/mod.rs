@@ -220,6 +220,108 @@ impl Patcher {
         Err(t("memory_changed").into())
     }
 
+    /// Entries in the new client builds may have a different stride/flags. A key store is still
+    /// recognisable by twelve consecutive u32 ids 1..12 and non-trivial Ed25519 keys. Search with
+    /// several strides; this is only used when the known-key scan finds nothing.
+    fn state_any(&self, mem: &dyn Memory, array: u64, stride: usize) -> State {
+        let len = 12 * stride;
+        let Some(raw) = mem.read(array, len) else { return State::Invalid };
+        if raw.len() != len {
+            return State::Invalid;
+        }
+        for e in 0..COUNT {
+            let o = e * stride;
+            if u32::from_le_bytes(raw[o..o + 4].try_into().unwrap()) != e as u32 + 1 {
+                return State::Invalid;
+            }
+            if stride >= 36 {
+                let key = &raw[o + 4..o + 36];
+                // random public keys do not contain long zero runs; pointers/id tables do
+                if key.iter().all(|b| *b == 0) || key.windows(4).any(|w| w == [0, 0, 0, 0]) {
+                    return State::Invalid;
+                }
+                if stride >= 40 && raw[o + 36] > 1 {
+                    return State::Invalid;
+                }
+            }
+        }
+        let t = (self.group - 1) * stride + 4;
+        if t + 32 > raw.len() {
+            State::Invalid
+        } else if raw[t..t + 32] == self.new_key {
+            State::Patched
+        } else {
+            State::Original
+        }
+    }
+
+    fn find_stores_any(&self, mem: &dyn Memory) -> Vec<(u64, usize, State)> {
+        let needle = [1u8, 0, 0, 0];
+        let finder = memmem::Finder::new(&needle);
+        let mut found = Vec::new();
+        for (lo, hi) in mem.regions() {
+            let mut off = lo;
+            while off < hi {
+                let take = CHUNK.min((hi - off) as usize);
+                let Some(buf) = mem.read(off, take) else { break };
+                for i in finder.find_iter(&buf) {
+                    if i % 4 != 0 || i + 12 * 64 > buf.len() {
+                        continue;
+                    }
+                    for stride in (32..=64).step_by(4) {
+                        let st = self.state_any(mem, off + i as u64, stride);
+                        if st != State::Invalid {
+                            found.push((off + i as u64, stride, st));
+                        }
+                    }
+                }
+                if take < CHUNK {
+                    break;
+                }
+                off += (CHUNK - needle.len()) as u64;
+            }
+        }
+        found.sort_by_key(|f| (f.0, f.1));
+        found.dedup_by_key(|f| (f.0, f.1));
+        found
+    }
+
+    fn patch_any(&self, mem: &dyn Memory, array: u64, stride: usize) -> Result<(), String> {
+        let addr = array + ((self.group - 1) * stride + 4) as u64;
+        if !mem.write(addr, &self.new_key) {
+            return Err(t("write_refused").into());
+        }
+        if self.state_any(mem, array, stride) == State::Patched {
+            Ok(())
+        } else {
+            Err(t("verify_failed").into())
+        }
+    }
+
+    /// Diagnostic: candidates found without the known keys, written next to the launcher settings.
+    fn dump_candidates(&self, mem: &dyn Memory) -> Option<std::path::PathBuf> {
+        let stores = self.find_stores_any(mem);
+        let path = crate::config::config_dir().join("keystore-scan.txt");
+        if stores.is_empty() {
+            std::fs::write(&path, "no candidates\n").ok()?;
+            return Some(path);
+        }
+        let mut text = String::new();
+        for (addr, stride, st) in stores.iter().take(200) {
+            text.push_str(&format!("addr={addr:#x} stride={stride} state={st:?}\n"));
+            if let Some(raw) = mem.read(*addr, 12 * *stride) {
+                for e in 0..COUNT {
+                    let o = e * *stride;
+                    let key = raw.get(o + 4..o + 36).map(hex::encode).unwrap_or_default();
+                    let flag = raw.get(o + 36).copied().unwrap_or(0);
+                    text.push_str(&format!("  {} flag={} key={}\n", e + 1, flag, key));
+                }
+            }
+        }
+        std::fs::write(&path, text).ok()?;
+        Some(path)
+    }
+
     /// Watches the client until it closes. `switch` may return a better process (Linux: the Wine launcher process
     /// is found before the real game process).
     pub fn watch(&self, mut mem: Box<dyn Memory>, mut switch: impl FnMut(&dyn Memory) -> Option<Box<dyn Memory>>,
@@ -227,6 +329,7 @@ impl Patcher {
         let mut store: Option<u64> = None;
         let mut last_switch = Instant::now();
         let mut last_structural = Instant::now() - Duration::from_secs(10);
+        let mut dumped = false;
         let mut said_waiting = false;
         loop {
             if !mem.alive() {
@@ -265,7 +368,7 @@ impl Patcher {
                 }
             }
             let stores = self.find_stores(mem.as_ref());
-            if stores.is_empty() && last_structural.elapsed() > Duration::from_secs(5) {
+            if stores.is_empty() && last_structural.elapsed() > Duration::from_secs(1) {
                 last_structural = Instant::now();
                 let structural = self.find_structural_stores(mem.as_ref());
                 match structural.as_slice() {
@@ -281,7 +384,25 @@ impl Patcher {
                             continue;
                         }
                     },
-                    [] => {}
+                    [] => {
+                        let any = self.find_stores_any(mem.as_ref());
+                        if let [(array, stride, _)] = any.as_slice() {
+                            match self.patch_any(mem.as_ref(), *array, *stride) {
+                                Ok(()) => {
+                                    emit(Event::Log(tf("key_written", &[&self.group])));
+                                    emit(Event::Ready);
+                                    store = Some(*array);
+                                    continue;
+                                }
+                                Err(e) => emit(Event::Log(tf("key_write_retry", &[&e]))),
+                            }
+                        } else if any.is_empty() && !dumped {
+                            dumped = true;
+                            if let Some(path) = self.dump_candidates(mem.as_ref()) {
+                                emit(Event::Log(format!("keystore scan: {}", path.display())));
+                            }
+                        }
+                    }
                     many => emit(Event::Log(tf("many_key_stores", &[&many.len()]))),
                 }
             }
