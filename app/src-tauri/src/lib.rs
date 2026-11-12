@@ -455,7 +455,9 @@ fn wait_for_client(child_pid: u32) -> Option<patcher::ProcessMemory> {
         return Some(m);
     }
     let _ = child_pid;
-    for _ in 0..180 {
+    // The client usually starts within a few seconds; 180 s left the UI showing "playing" long
+    // after the player had already closed the game when the process was not found at all.
+    for _ in 0..60 {
         if let Some(m) = patcher::find_client() {
             return Some(m);
         }

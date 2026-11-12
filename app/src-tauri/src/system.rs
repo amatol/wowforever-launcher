@@ -482,13 +482,9 @@ mod imp {
         if !proton.is_file() {
             return Err(tf("proton_not_found", &[&l.runner]));
         }
-        if which("umu-run") {
-            env.push(("WINEPREFIX".into(), l.prefix.clone()));
-            env.push(("PROTONPATH".into(), l.runner.clone()));
-            env.push(("GAMEID".into(), "umu-default".into()));
-            env.push(("STORE".into(), "none".into()));
-            return Ok((vec!["umu-run".into()], env));
-        }
+        // No umu-run: it wraps Proton in the Steam Runtime/pressure-vessel, where the game process
+        // is no longer reachable from the launcher (Yama ptrace_scope=1) and the key patcher cannot
+        // write the server key. `runinprefix` keeps the game in the launcher's process tree.
         // SteamOS: Proton from Steam started directly; the Wine prefix is <prefix>/pfx.
         // `runinprefix` runs wine itself instead of going through the Steam runtime/pressure-vessel:
         // the game stays a child of the launcher, so /proc/<pid>/mem is writable (Yama ptrace_scope=1)

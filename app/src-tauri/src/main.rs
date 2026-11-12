@@ -16,9 +16,12 @@ fn main() {
     if args.iter().any(|arg| arg == "--play") {
         forever_launcher_lib::set_autoplay(true);
     }
-    // WebKitGTK: the DMA-BUF renderer gives a blank window on some GPU/Wayland setups (NVIDIA...)
+    // WebKitGTK: the DMA-BUF renderer gives a blank window on some NVIDIA/Wayland setups.
+    // On SteamOS (AMD) it is not needed, and disabling it makes the launcher noticeably slower.
     #[cfg(target_os = "linux")]
-    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none()
+        && std::path::Path::new("/proc/driver/nvidia").exists()
+    {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     }
     forever_launcher_lib::run()

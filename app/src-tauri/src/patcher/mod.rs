@@ -265,7 +265,7 @@ impl Patcher {
                 }
             }
             let stores = self.find_stores(mem.as_ref());
-            if stores.is_empty() && last_structural.elapsed() > Duration::from_secs(2) {
+            if stores.is_empty() && last_structural.elapsed() > Duration::from_secs(5) {
                 last_structural = Instant::now();
                 let structural = self.find_structural_stores(mem.as_ref());
                 match structural.as_slice() {
@@ -302,7 +302,7 @@ impl Patcher {
                         emit(Event::Log(t("waiting_realm").into()));
                         said_waiting = true;
                     }
-                    std::thread::sleep(Duration::from_millis(150));
+                    std::thread::sleep(Duration::from_millis(500));
                 }
                 many => {
                     emit(Event::Log(tf("many_key_stores", &[&many.len()])));
