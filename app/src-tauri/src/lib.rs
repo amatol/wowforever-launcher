@@ -9,9 +9,11 @@ mod launcher_update;
 #[cfg(target_os = "macos")]
 mod macos;
 // macOS: no external memory patch (see macos.rs); kept for its tests
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(not(windows), allow(dead_code, unused_imports))]
 mod patcher;
 mod system;
+#[cfg(target_os = "linux")]
+mod steamos;
 mod updater;
 
 use config::{Session, Settings};
@@ -20,7 +22,7 @@ use serde::Serialize;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, State};
 
@@ -396,32 +398,18 @@ async fn launch(app: &AppHandle, settings: Settings) -> Result<(), String> {
     Ok(())
 }
 
-/// Windows, Linux: the game is started, then the patcher writes the key into its memory.
+/// SteamOS: the PE helper owns the game process inside the selected prefix.
 #[cfg(target_os = "linux")]
 async fn launch(app: &AppHandle, settings: Settings) -> Result<(), String> {
     emit(app, "step", t("step_launching"));
-    let mut child = game::spawn(&settings)?;
-    let log = game::keypatch_log_path();
+    let launch = game::spawn(&settings)?;
+    emit(app, "log", format!("SteamOS keypatch: {}", launch.log.display()));
+    emit(app, "log", format!("Proton: {}", launch.runner_log.display()));
     let app = app.clone();
     std::thread::spawn(move || {
-        emit(&app, "running", t("running"));
-        let mut ready = false;
-        loop {
-            if !ready {
-                if let Ok(text) = std::fs::read_to_string(&log) {
-                    if text.contains("server key written") {
-                        emit(&app, "ready", t("ready"));
-                        ready = true;
-                    }
-                }
-            }
-            match child.try_wait() {
-                Ok(Some(_)) | Err(_) => break,
-                Ok(None) => std::thread::sleep(Duration::from_millis(250)),
-            }
+        if steamos::watch(launch, |kind, message| emit(&app, kind, message)) {
+            app.state::<AppState>().playing.store(false, Ordering::SeqCst);
         }
-        emit(&app, "closed", t("closed"));
-        app.state::<AppState>().playing.store(false, Ordering::SeqCst);
     });
     Ok(())
 }

@@ -632,6 +632,8 @@ listen('game', ({ payload }) => {
   if (kind === 'step' || kind === 'running') setStep(message);
   if (kind === 'ready') setStep(message, 'ok');
   if (kind === 'error') setStep(message, 'err');
+  // A helper warning is visible, but the game is still running: keep Play locked.
+  if (kind === 'warning') setStep(message, 'err');
   if (kind === 'closed' && autoPlayActive) {
     invoke('quit_launcher').catch(() => {});
     return;

@@ -35,11 +35,10 @@ npx @tauri-apps/cli@2 build --bundles nsis
 
 Отдельная сборка `Forever-AI-SteamOS.AppImage` (job `linux` в workflow,
 собирается на `ubuntu-22.04`). Свой WebKitGTK лежит внутри AppImage, системный
-WebView не нужен; через Proton запускается только `Wow.exe`.
+WebView2 не нужен; через Proton запускаются маленький PE64-помощник и `Wow.exe`.
 
-- Proton берётся из Steam (Библиотека → Инструменты → Proton). Если есть
-  `umu-run` — запуск через него, иначе Proton запускается напрямую
-  (`proton run` с `STEAM_COMPAT_DATA_PATH`). Wine не нужен.
+- Proton берётся из Steam (Библиотека → Инструменты → Proton) или GE-Proton.
+  Запуск: `proton run` с `STEAM_COMPAT_DATA_PATH`. Отдельный системный Wine не нужен.
 - Префикс по умолчанию: `~/Games/forever-wow`.
 - `hosts` и установка CA не нужны: портал `trinity.actual.mmolabs.ru`
   резолвится публичным DNS, сертификат Let's Encrypt проверяется системным
@@ -48,9 +47,37 @@ WebView не нужен; через Proton запускается только `
 - Автообновление: `launcher_manifest_linux.json`, публикация —
   `wowserver/scripts/publish-launcher-steamos.sh`.
 - Для Game Mode: «Добавить стороннюю игру» → AppImage, параметр запуска `--play`.
+  **Не включайте принудительную совместимость Proton для самого AppImage**:
+  лаунчер нативный и запускает выбранный Proton самостоятельно.
 
+Ключ записывает `forever-keypatch.exe` через `ReadProcessMemory`/`WriteProcessMemory`
+в том же Wine/Proton-префиксе. Помощник сам запускает игру, отслеживает её процесс
+и дочерний клиент, проверяет полное хранилище 12 × 40 байт перед записью и после неё.
+Неизвестные ключи, неоднозначные кандидаты и неполные чтения не разрешают запись.
+После успешной установки проверяются только 480 байт, а не вся память.
+`LD_PRELOAD`, root, отключение Yama и запись в исполняемый файл не используются.
+
+При каждом запуске создаются отдельные `keypatch.log` и `proton.log` в
+`~/.config/forever-launcher-app/runs/<идентификатор>/` (или `$XDG_CONFIG_HOME`).
+Их полные пути выводятся в журнале лаунчера сразу после запуска.
+`READY ... verified=1` означает проверенную запись ключа, **не** подтверждение входа в мир.
+При потере связи с помощником лаунчер предупреждает и не разблокирует повторный
+запуск автоматически: сначала закройте оставшуюся игру и перезапустите лаунчер.
+
+Для сборки PE64-помощника нужен пакет `gcc-mingw-w64-x86-64` (только на машине сборки).
 Локально: `cargo install tauri-cli --version "^2" --locked`, затем
 `cd app && cargo tauri build --bundles appimage`.
+
+Тесты помощника без сервера и учётных записей:
+
+```sh
+cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined app/linux/test_keystore.c -o /tmp/test-keystore
+/tmp/test-keystore
+PROTON=/path/to/proton xvfb-run -a python3 app/linux/test_proton.py
+```
+
+Тесты создают отдельный временный префикс и синтетический `Wow.exe`; проверка
+реального входа на сервер всё равно требует Steam Deck/Steam Machine.
 
 ## Настройки
 

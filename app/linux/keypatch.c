@@ -1,206 +1,286 @@
-// Loaded with LD_PRELOAD into the Wine process that runs Wow.exe. It writes the server's Ed25519
-// key into the client's key store from inside the process, so it does not need ptrace access to
-// /proc/<pid>/mem (which SteamOS restricts under pressure-vessel / Yama ptrace_scope=1).
-//
-// Environment: FOREVER_SERVER_KEY (64 hex chars), FOREVER_REGION_GROUP (default 8),
-// FOREVER_PATCH_LOG (log file, default /tmp/forever-keypatch.log).
-
-#define _GNU_SOURCE
-#include <ctype.h>
-#include <fcntl.h>
-#include <pthread.h>
-#include <stdarg.h>
-#include <stdint.h>
+/* PE64 helper run by the same Wine/Proton as the game. It owns the game launch and
+ * uses Wine's Windows APIs, not ptrace, host /proc memory or LD_PRELOAD hooks.
+ * Protocol: newline-delimited records flushed to the per-launch log, no tickets. */
+#define WIN32_LEAN_AND_MEAN
+#define _WIN32_WINNT 0x0601
+#include <windows.h>
+#include <tlhelp32.h>
 #include <stdio.h>
+#include <stdarg.h>
+#include <wchar.h>
 #include <stdlib.h>
-#include <string.h>
-#include <errno.h>
-#include <time.h>
-#include <unistd.h>
+#include "keystore.h"
 
-#define ENTRY 40
-#define COUNT 12
-#define BLOCK (ENTRY * COUNT)
-#define CHUNK (8 * 1024 * 1024)
+#define CHUNK (1024 * 1024)
+#define MAX_CLIENTS 16
+#define MAX_OWNED 256
 
-static const char *KNOWN_KEYS[COUNT] = {
-    "9B0671C815DFF513BFD4A2B26AE1F84EC9106841B2FB620DB65F6ADE7C21AD06",
-    "112451B9843C2799E4750AA3D9B9AFABF536A645B863C4ADB2078B932B354E04",
-    "A6B858485748BF38BE193517AB90F8DE169EFF0989EA9360DB346A378B0FFE15",
-    "50FFDEB807F8FF73A299A16000AA6575C5945BE875ADFC8795374ED3415249AC",
-    "9F842D078755647C008E5FE3E12B839A981DE02A1F520CB2545CC04CD2323E0E",
-    "B8CC75864D8EF461D8DD6AA7425E2C63C24D3982066B8D773A1549BFE24E05EE",
-    "76BB7BBDD9F34E124A4573C3AA227E3C87CC603506697D054F6FDEC342E56EBF",
-    "1FD6DD8FA0EC30D39E3F72E755B8A045BDE0F70449DC71008B767C2EAA89FB9F",
-    "15D618BD7DB577BD9A8D45769C59E4FC631633BF447398A4B489B4C26FBC03AD",
-    "B34EC592D2AC4993F5FFC85B15C3DA9078694051CB224345592AF7136D796C99",
-    "9E91586DD4B115AB0568B21959E181F6545910BC5E2F30B8975CA09D7BC3EFCE",
-    "769C824A1DADD19AEEFA420414D1732DAF44537F98AA229FC5477BCA55F9D59A",
-};
+static FILE *log_file;
+static uint8_t keys[KEY_COUNT][32], replacement[32];
+static unsigned group;
+static ULONGLONG last_heartbeat;
+static DWORD owned[MAX_OWNED];
+static size_t owned_count;
 
-static uint8_t keys[COUNT][32];
-static uint8_t server_key[32];
-static int group = 8;
-static char log_path[512] = "/tmp/forever-keypatch.log";
-static int finished;
-
-static void say(const char *fmt, ...) {
-    FILE *f = fopen(log_path, "a");
-    if (!f) return;
-    time_t t = time(NULL);
-    char ts[32];
-    strftime(ts, sizeof ts, "%H:%M:%S", localtime(&t));
-    fprintf(f, "%s [forever] ", ts);
-    va_list ap;
-    va_start(ap, fmt);
-    vfprintf(f, fmt, ap);
-    va_end(ap);
-    fputc('\n', f);
-    fclose(f);
+static int is_owned(DWORD pid) {
+    for (size_t i = 0; i < owned_count; ++i) if (owned[i] == pid) return 1;
+    return 0;
 }
 
-static int hex32(const char *s, uint8_t out[32]) {
-    if (!s || strlen(s) != 64) return 0;
-    for (int i = 0; i < 32; i++) {
-        unsigned v;
-        if (sscanf(s + 2 * i, "%2x", &v) != 1) return 0;
-        out[i] = (uint8_t)v;
+static void record(const char *kind, const char *fmt, ...) {
+    fprintf(log_file, "%s ", kind);
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(log_file, fmt, args);
+    va_end(args);
+    fputc('\n', log_file);
+    fflush(log_file);
+}
+
+static void heartbeat(void) {
+    ULONGLONG now = GetTickCount64();
+    if (now - last_heartbeat >= 2000) {
+        record("HEARTBEAT", "%llu", (unsigned long long)now);
+        last_heartbeat = now;
     }
-    return 1;
 }
 
-static int is_game_process(void) {
-    char buf[8192];
-    int fd = open("/proc/self/cmdline", O_RDONLY);
-    if (fd < 0) return 0;
-    ssize_t n = read(fd, buf, sizeof buf - 1);
-    close(fd);
-    if (n <= 0) return 0;
-    buf[n] = 0;
-    // only argv[0]: start.exe also has Wow.exe in its command line, but it is not the game process
-    for (ssize_t i = 0; i < n; i++) {
-        if (buf[i] == 0) { buf[i] = 0; break; }
-        buf[i] = (char)tolower((unsigned char)buf[i]);
+static int read_exact(HANDLE process, uintptr_t address, void *buffer, size_t len) {
+    SIZE_T got = 0;
+    return ReadProcessMemory(process, (void *)address, buffer, len, &got) && got == len;
+}
+
+static int live(HANDLE process) {
+    return WaitForSingleObject(process, 0) == WAIT_TIMEOUT;
+}
+
+static int state_at(HANDLE process, uintptr_t address) {
+    uint8_t raw[KEY_BLOCK];
+    if (!read_exact(process, address, raw, sizeof raw)) return 0;
+    return keystore_state(raw, sizeof raw, keys, replacement, group);
+}
+
+static int patch_store(HANDLE process, uintptr_t address) {
+    /* Revalidate the entire store immediately before writing. Never change protection. */
+    int state = state_at(process, address);
+    if (state == 2) return 1;
+    if (state != 1) return 0;
+    SIZE_T written = 0;
+    uintptr_t target = address + (group - 1) * KEY_ENTRY + 4;
+    if (!WriteProcessMemory(process, (void *)target, replacement, 32, &written) || written != 32) {
+        record("WARN", "write failed winerr=%lu", GetLastError());
+        return 0;
     }
-    return strstr(buf, "wow.exe") != NULL || strstr(buf, "wowb.exe") != NULL;
+    return state_at(process, address) == 2;
 }
 
-// key[i] is at offset 4 in each entry; ids are 1..12, entries are `stride` bytes apart
-static int store_state(int mem, unsigned long long addr, int stride, int *patched) {
-    if (stride < 36 || stride > 128) return 0;
-    uint8_t raw[COUNT * 128];
-    (void)mem;
-    memcpy(raw, (void *)(uintptr_t)addr, (size_t)COUNT * stride);
-    for (int e = 0; e < COUNT; e++) {
-        int o = e * stride;
-        uint32_t id;
-        memcpy(&id, raw + o, 4);
-        if (id != (uint32_t)e + 1) return 0;
-        uint8_t *key = raw + o + 4;
-        int nonzero = 0;
-        for (int i = 0; i < 32; i++) nonzero |= key[i];
-        if (!nonzero) return 0;
-        for (int i = 0; i + 4 <= 32; i++) {
-            if (!key[i] && !key[i + 1] && !key[i + 2] && !key[i + 3]) return 0;
-        }
-        if (stride >= 40 && raw[o + 36] > 1) return 0;
-    }
-    *patched = memcmp(raw + (group - 1) * stride + 4, server_key, 32) == 0;
-    return 1;
+typedef struct {
+    DWORD pid;
+    HANDLE handle;
+    uintptr_t store;
+    ULONGLONG next_scan;
+    ULONGLONG first_seen;
+    ULONGLONG next_warning;
+    int ready;
+} Client;
+
+static int writable(DWORD protect) {
+    if (protect & (PAGE_GUARD | PAGE_NOACCESS)) return 0;
+    DWORD base = protect & 0xff;
+    return base == PAGE_READWRITE || base == PAGE_WRITECOPY ||
+           base == PAGE_EXECUTE_READWRITE || base == PAGE_EXECUTE_WRITECOPY;
 }
 
-static int patch_at(int mem, unsigned long long addr, int stride) {
-    uint8_t cur[32];
-    (void)mem;
-    off_t at = (off_t)(addr + (unsigned long)(group - 1) * stride + 4);
-    memcpy(cur, (void *)(uintptr_t)at, 32);
-    if (memcmp(cur, server_key, 32) == 0) return 1;
-    // the region is writable (checked in scan_maps); write from inside the process, no ptrace
-    memcpy((void *)(uintptr_t)at, server_key, 32);
-    int patched = 0;
-    return store_state(mem, addr, stride, &patched) && patched;
-}
-
-static int scan_maps(void) {
-    FILE *maps = fopen("/proc/self/maps", "r");
-    if (!maps) { say("cannot open /proc/self/maps"); return 0; }
-    int mem = open("/proc/self/mem", O_RDONLY);
-    if (mem < 0) { say("cannot open /proc/self/mem: %d", errno); fclose(maps); return 0; }
-    static uint8_t buf[CHUNK + 64];
-    char line[1024];
-    int found = 0;
-    while (!found && fgets(line, sizeof line, maps)) {
-        unsigned long long lo, hi;
-        char perms[8] = {0};
-        if (sscanf(line, "%llx-%llx %7s", &lo, &hi, perms) != 3) continue;
-        if (perms[0] != 'r' || perms[1] != 'w') continue;
-        char *path = strchr(line, '/');
-        if (path && strstr(path, "[stack]")) continue;
-        if (hi <= lo || hi - lo > (1ULL << 31)) continue;
-        unsigned long long off = lo;
-        while (!found && off < hi) {
-            size_t take = (size_t)((hi - off < CHUNK) ? (hi - off) : CHUNK);
-            ssize_t n = pread(mem, buf, take, (off_t)off);
-            if (n <= 0) break;
-            // 1) old known keys: find the first key of the store
-            for (size_t i = 0; !found && i + 32 <= (size_t)n; i++) {
-                if (memcmp(buf + i, keys[0], 32) != 0) continue;
-                if (i < 4) continue;
-                unsigned long long addr = off + i - 4;
-                int patched = 0;
-                if (store_state(0, addr, ENTRY, &patched)) {
-                    if (patch_at(0, addr, ENTRY)) { found = 1; }
-                }
-            }
-            // 2) structural: ids 1..12; try common entry sizes
-            for (size_t i = 0; !found && i + 4 <= (size_t)n; i += 4) {
-                uint32_t id;
-                memcpy(&id, buf + i, 4);
-                if (id != 1) continue;
-                for (int stride = 40; stride <= 64 && !found; stride += 8) {
-                    int patched = 0;
-                    if (store_state(mem, off + i, stride, &patched)) {
-                        if (patch_at(0, off + i, stride)) found = 1;
+static uintptr_t scan(Client *client, uint8_t *buffer) {
+    uintptr_t address = 0, candidate = 0;
+    size_t matches = 0, shapes = 0, regions = 0, failures = 0;
+    unsigned long long bytes = 0;
+    ULONGLONG began = GetTickCount64();
+    MEMORY_BASIC_INFORMATION info;
+    while (live(client->handle) && VirtualQueryEx(client->handle, (void *)address, &info, sizeof info)) {
+        uintptr_t lo = (uintptr_t)info.BaseAddress;
+        if (info.RegionSize > UINTPTR_MAX - lo) break;
+        uintptr_t hi = lo + info.RegionSize;
+        if (hi <= address) break;
+        address = hi;
+        if (info.State != MEM_COMMIT || !writable(info.Protect)) continue;
+        ++regions;
+        for (uintptr_t off = lo; off < hi && live(client->handle);) {
+            size_t take = hi - off < CHUNK ? (size_t)(hi - off) : CHUNK;
+            SIZE_T got = 0;
+            ReadProcessMemory(client->handle, (void *)off, buffer, take, &got);
+            bytes += got;
+            /* Scan only bytes copied successfully; no direct pointer dereferences. */
+            for (size_t i = 0; i + KEY_BLOCK <= got;) {
+                const uint8_t *hit = memchr(buffer + i, 1, got - KEY_BLOCK - i + 1);
+                if (!hit) break;
+                i = (size_t)(hit - buffer);
+                if ((off + i) % 4 == 0 && keystore_shape(hit, got - i)) {
+                    ++shapes;
+                    if (keystore_state(hit, got - i, keys, replacement, group)) {
+                        candidate = off + i;
+                        ++matches;
                     }
                 }
+                ++i;
             }
-            if ((size_t)n < take || off + take >= hi) break;
-            off += (unsigned long long)n - 64;
+            heartbeat();
+            /* Bound the work per pass as well as the memory allocation. */
+            if (GetTickCount64() - began > 10000) {
+                record("WARN", "pid=%lu scan timed out; no write", client->pid);
+                return 0;
+            }
+            if (got != take) ++failures;
+            if (off + take == hi) break;
+            if (got == take) off += take - (KEY_BLOCK - 1);
+            else off += take; /* Failed/partial pages are retried on the next pass. */
+            Sleep(1);
         }
     }
-    close(mem);
-    fclose(maps);
-    return found;
-}
-
-static void *worker(void *unused) {
-    (void)unused;
-    for (int i = 0; i < 240 && !finished; i++) {
-        if (scan_maps()) {
-            say("server key written (group %d)", group);
-            finished = 1;
-            return NULL;
+    record("SCAN", "pid=%lu regions=%zu bytes=%llu read_failures=%zu known=%zu shapes=%zu ms=%llu",
+           client->pid, regions, bytes, failures, matches, shapes,
+           (unsigned long long)(GetTickCount64() - began));
+    if (matches != 1) {
+        if ((matches > 1 || GetTickCount64() - client->first_seen >= 15000) &&
+            GetTickCount64() >= client->next_warning) {
+            record("WARN", "pid=%lu expected one verified key store, found %zu; no write", client->pid, matches);
+            client->next_warning = GetTickCount64() + 15000;
         }
-        usleep(500000);
+        return 0;
     }
-    say("key store not found");
-    return NULL;
+    return candidate;
 }
 
-__attribute__((constructor)) static void init(void) {
-    const char *s = getenv("FOREVER_SERVER_KEY");
-    const char *g = getenv("FOREVER_REGION_GROUP");
-    const char *l = getenv("FOREVER_PATCH_LOG");
-    if (l && *l) snprintf(log_path, sizeof log_path, "%s", l);
-    if (!is_game_process()) return;
-    for (int i = 0; i < COUNT; i++) hex32(KNOWN_KEYS[i], keys[i]);
-    if (!hex32(s, server_key)) {
-        say("no valid FOREVER_SERVER_KEY");
-        return;
+/* A new same-path client in this wineserver can replace a launcher stub. Older
+ * already-running games and executables in other directories are never patched. */
+static void discover(Client clients[MAX_CLIENTS], const wchar_t *game, ULONGLONG started) {
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return;
+    PROCESSENTRY32W entry = {0};
+    entry.dwSize = sizeof entry;
+    for (BOOL ok = Process32FirstW(snapshot, &entry); ok; ok = Process32NextW(snapshot, &entry)) {
+        /* Remember descendants even if an intermediate launcher exits. Never select an
+         * independently started game just because its executable path happens to match. */
+        if (!is_owned(entry.th32ProcessID) && is_owned(entry.th32ParentProcessID) && owned_count < MAX_OWNED)
+            owned[owned_count++] = entry.th32ProcessID;
+        if (!is_owned(entry.th32ProcessID)) continue;
+        if (_wcsicmp(entry.szExeFile, L"Wow.exe") && _wcsicmp(entry.szExeFile, L"WowB.exe")) continue;
+        int slot = -1, exists = 0;
+        for (int i = 0; i < MAX_CLIENTS; ++i) {
+            if (clients[i].handle && clients[i].pid == entry.th32ProcessID) exists = 1;
+            if (!clients[i].handle && slot < 0) slot = i;
+        }
+        if (exists || slot < 0) continue;
+        HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ |
+            PROCESS_VM_WRITE | PROCESS_VM_OPERATION | SYNCHRONIZE, FALSE, entry.th32ProcessID);
+        if (!process) continue;
+        wchar_t path[32768];
+        DWORD len = (DWORD)(sizeof path / sizeof path[0]);
+        FILETIME created, exited, kernel, user;
+        ULARGE_INTEGER stamp;
+        int valid = live(process) && QueryFullProcessImageNameW(process, 0, path, &len) && !_wcsicmp(path, game) &&
+                    GetProcessTimes(process, &created, &exited, &kernel, &user);
+        if (valid) {
+            stamp.LowPart = created.dwLowDateTime;
+            stamp.HighPart = created.dwHighDateTime;
+            valid = stamp.QuadPart >= started;
+        }
+        if (!valid) { CloseHandle(process); continue; }
+        clients[slot] = (Client){.pid = entry.th32ProcessID, .handle = process, .first_seen = GetTickCount64()};
+        record("PROCESS", "pid=%lu", entry.th32ProcessID);
     }
-    if (g) group = atoi(g);
-    if (group < 2 || group > 12 || group == 9) group = 8;
-    say("loaded into the game process (pid %d), group %d", (int)getpid(), group);
-    pthread_t th;
-    if (pthread_create(&th, NULL, worker, NULL) == 0) pthread_detach(th);
+    CloseHandle(snapshot);
+}
+
+int wmain(int argc, wchar_t **argv) {
+    /* argv: helper log game key group; no account, password or login ticket. */
+    if (argc != 5) return 2;
+    log_file = _wfopen(argv[1], L"ab");
+    if (!log_file) return 3;
+    char key[65];
+    size_t key_len = wcslen(argv[3]);
+    if (key_len != 64) { record("ERROR", "invalid public key"); return 4; }
+    for (size_t i = 0; i <= key_len; ++i) key[i] = argv[3][i] <= 127 ? (char)argv[3][i] : '?';
+    wchar_t *end;
+    unsigned long parsed = wcstoul(argv[4], &end, 10);
+    if (*end || parsed < 2 || parsed > 12 || parsed == 9 || !decode_key(key, replacement)) {
+        record("ERROR", "invalid public key or region group"); return 4;
+    }
+    group = (unsigned)parsed;
+    for (unsigned i = 0; i < KEY_COUNT; ++i) decode_key(known_keys[i], keys[i]);
+    record("START", "helper=%lu group=%u protocol=1", GetCurrentProcessId(), group);
+    wchar_t game[32768];
+    DWORD len = GetFullPathNameW(argv[2], (DWORD)(sizeof game / sizeof game[0]), game, NULL);
+    if (!len || len >= sizeof game / sizeof game[0] || wcschr(game, L'"')) {
+        record("ERROR", "invalid game path"); return 5;
+    }
+    wchar_t command[32768];
+    if (wcslen(game) + 32 >= sizeof command / sizeof command[0]) {
+        record("ERROR", "game path too long"); return 5;
+    }
+    swprintf(command, sizeof command / sizeof command[0], L"\"%ls\" -launcherlogin", game);
+    uint8_t *buffer = malloc(CHUNK);
+    if (!buffer) { record("ERROR", "out of memory"); return 6; }
+    FILETIME now;
+    GetSystemTimeAsFileTime(&now);
+    ULARGE_INTEGER started = {.LowPart = now.dwLowDateTime, .HighPart = now.dwHighDateTime};
+    STARTUPINFOW startup = {0};
+    startup.cb = sizeof startup;
+    PROCESS_INFORMATION child;
+    if (!CreateProcessW(game, command, NULL, NULL, FALSE, 0, NULL, NULL, &startup, &child)) {
+        record("ERROR", "CreateProcessW failed winerr=%lu", GetLastError());
+        free(buffer); return 7;
+    }
+    CloseHandle(child.hThread);
+    Client clients[MAX_CLIENTS] = {{0}};
+    clients[0] = (Client){.pid = child.dwProcessId, .handle = child.hProcess, .first_seen = GetTickCount64()};
+    owned[owned_count++] = child.dwProcessId;
+    record("PROCESS", "pid=%lu", child.dwProcessId);
+    ULONGLONG empty_since = 0;
+    DWORD exit_code = 0;
+    for (;;) {
+        heartbeat();
+        for (int i = 0; i < MAX_CLIENTS; ++i) {
+            Client *c = &clients[i];
+            if (!c->handle) continue;
+            if (!live(c->handle)) {
+                GetExitCodeProcess(c->handle, &exit_code);
+                record("EXIT", "pid=%lu code=%lu", c->pid, exit_code);
+                CloseHandle(c->handle);
+                memset(c, 0, sizeof *c);
+            }
+        }
+        discover(clients, game, started.QuadPart);
+        int active = 0;
+        for (int i = 0; i < MAX_CLIENTS; ++i) {
+            Client *c = &clients[i];
+            if (!c->handle) continue;
+            ++active;
+            if (c->store && !state_at(c->handle, c->store)) {
+                record("WARN", "pid=%lu key store changed; rescanning", c->pid);
+                c->store = 0;
+                c->ready = 0;
+            }
+            if (!c->store && GetTickCount64() >= c->next_scan) {
+                c->store = scan(c, buffer);
+                /* The store can be allocated during startup, shortly before autologin.
+                 * Retry promptly at first; after READY only 480 bytes are polled. */
+                c->next_scan = GetTickCount64() + (GetTickCount64() - c->first_seen < 20000 ? 500 : 5000);
+            }
+            if (c->store && state_at(c->handle, c->store) != 2) c->ready = 0;
+            if (c->store && !c->ready && patch_store(c->handle, c->store)) {
+                record("READY", "pid=%lu group=%u address=%llx verified=1", c->pid, group,
+                       (unsigned long long)c->store);
+                c->ready = 1;
+            }
+        }
+        if (active) empty_since = 0;
+        else if (!empty_since) empty_since = GetTickCount64();
+        else if (GetTickCount64() - empty_since >= 3000) break;
+        Sleep(250);
+    }
+    record("CLOSED", "exit=%lu", exit_code);
+    free(buffer);
+    fclose(log_file);
+    return 0;
 }

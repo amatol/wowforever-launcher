@@ -33,18 +33,20 @@ fn embed_ca() {
     std::fs::write(out, pem.trim().to_string() + "\n").unwrap();
 }
 
-/// Linux/SteamOS: LD_PRELOAD library that patches the client's key store from inside the game
-/// process (no ptrace/pressure-vessel restrictions).
+/// Linux/SteamOS: PE64 helper runs in the game's own Wine/Proton prefix.
 fn build_keypatch_linux() {
     let src = "../linux/keypatch.c";
     println!("cargo:rerun-if-changed={src}");
-    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("libforever_keypatch.so");
-    let status = Command::new("cc")
-        .args(["-shared", "-fPIC", "-O2", "-pthread", "-o"])
+    println!("cargo:rerun-if-changed=../linux/keystore.h");
+    println!("cargo:rerun-if-env-changed=FOREVER_MINGW_CC");
+    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("forever-keypatch.exe");
+    let compiler = std::env::var("FOREVER_MINGW_CC").unwrap_or_else(|_| "x86_64-w64-mingw32-gcc".into());
+    let status = Command::new(compiler)
+        .args(["-std=c11", "-municode", "-O2", "-Wall", "-Wextra", "-Werror", "-static", "-o"])
         .arg(&out)
         .arg(src)
         .status()
-        .expect("cc not found (install build-essential)");
+        .expect("MinGW compiler not found (install gcc-mingw-w64-x86-64)");
     assert!(status.success(), "building {src} failed");
 }
 

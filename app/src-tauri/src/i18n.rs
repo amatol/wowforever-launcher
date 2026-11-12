@@ -47,10 +47,11 @@ const MESSAGES: &[(&str, Texts)] = &[
     ("step_connecting", ["Подключение к серверу…", "Connecting to the server…", "Conectando con el servidor…", "Conectando ao servidor…"]),
     ("step_preparing", ["Подготовка игры…", "Preparing the game…", "Preparando el juego…", "Preparando o jogo…"]),
     ("step_launching", ["Запуск World of Warcraft…", "Starting World of Warcraft…", "Iniciando World of Warcraft…", "Iniciando World of Warcraft…"]),
-    ("running", ["Игра запущена: войдите в мир", "Game started: log in to the realm", "Juego iniciado: entra al reino", "Jogo iniciado: entre no reino"]),
+    ("running", ["Игра запущена: подготовка подключения…", "Game started: preparing the connection…", "Juego iniciado: preparando la conexión…", "Jogo iniciado: preparando a conexão…"]),
     ("ready", ["Ключ сервера установлен: входите в мир", "Server key in place: enter the realm", "Clave del servidor lista: entra al reino", "Chave do servidor pronta: entre no reino"]),
     ("closed", ["Игра закрыта", "The game is closed", "El juego se cerró", "O jogo foi fechado"]),
-    ("not_started", ["Игра не запустилась (Wow.exe не найден за 3 минуты)", "The game did not start (no Wow.exe found within 3 minutes)", "El juego no arrancó (no se encontró Wow.exe en 3 minutos)", "O jogo não iniciou (nenhum Wow.exe encontrado em 3 minutos)"]),
+    ("not_started", ["Игра не запустилась (Wow.exe не найден за 60 секунд)", "The game did not start (no Wow.exe found within 60 seconds)", "El juego no arrancó (no se encontró Wow.exe en 60 segundos)", "O jogo não iniciou (nenhum Wow.exe encontrado em 60 segundos)"]),
+    ("steamos_helper_timeout", ["Нет связи с помощником Proton. Игра могла остаться запущенной. Проверьте журналы:", "No response from the Proton helper. The game may still be running. Check the logs:", "El asistente de Proton no responde. El juego puede seguir abierto. Revisa los registros:", "O auxiliar do Proton não responde. O jogo pode continuar aberto. Confira os logs:"]),
     ("mac_copying", ["Копирование игры для Дримворлд Навсегда (первый раз или после обновления)…", "Copying the game for Dreamworld Forever (first time or after an update)…", "Copiando el juego para Forever (primera vez o tras una actualización)…", "Copiando o jogo para o Forever (primeira vez ou após uma atualização)…"]),
     ("mac_signing", ["Подпись копии игры…", "Signing the game copy…", "Firmando la copia del juego…", "Assinando a cópia do jogo…"]),
     // launch errors

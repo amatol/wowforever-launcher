@@ -5,7 +5,9 @@ use crate::config::Settings;
 use crate::i18n::tf;
 use std::path::Path;
 #[cfg(not(target_os = "macos"))]
-use std::process::{Child, Command};
+use std::process::Command;
+#[cfg(windows)]
+use std::process::Child;
 
 #[cfg(not(target_os = "macos"))]
 const LAUNCH_OPTIONS: &str = r"Software\Blizzard Entertainment\Battle.net\Launch Options\WoW";
@@ -128,40 +130,18 @@ pub fn spawn(settings: &Settings) -> Result<Child, String> {
         .map_err(|e| tf("launch_failed", &[&"Wow.exe", &e]))
 }
 
-/// LD_PRELOAD library that patches the client's key store from inside its Wine process.
 #[cfg(target_os = "linux")]
-const KEYPATCH_SO: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libforever_keypatch.so"));
-
-#[cfg(target_os = "linux")]
-pub fn keypatch_log_path() -> std::path::PathBuf {
-    crate::config::config_dir().join("keypatch.log")
-}
-
-#[cfg(target_os = "linux")]
-fn install_keypatch() -> Result<std::path::PathBuf, String> {
-    use std::os::unix::fs::PermissionsExt;
-    let path = crate::config::config_dir().join("libforever_keypatch.so");
-    if std::fs::read(&path).ok().as_deref() != Some(KEYPATCH_SO) {
-        std::fs::create_dir_all(crate::config::config_dir()).map_err(|e| e.to_string())?;
-        std::fs::write(&path, KEYPATCH_SO).map_err(|e| format!("{} : {e}", path.display()))?;
-    }
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
-    Ok(path)
-}
-
-#[cfg(target_os = "linux")]
-pub fn spawn(settings: &Settings) -> Result<Child, String> {
+pub fn spawn(settings: &Settings) -> Result<crate::steamos::Launch, String> {
+    // Validate before starting either the helper or the game.
+    crate::patcher::Patcher::new(&settings.server.public_key, settings.server.region_group)?;
+    let (helper, log, runner_log) = crate::steamos::prepare()?;
     let (runner, mut env) = crate::system::runner(settings)?;
     let mut cmd: Vec<String> = runner;
-    cmd.push(settings.exe().to_string_lossy().into_owned());
-    cmd.push("-launcherlogin".into());
-    let keypatch = install_keypatch()?;
-    let keypatch_log = keypatch_log_path();
-    let _ = std::fs::remove_file(&keypatch_log);
-    env.push(("LD_PRELOAD".into(), keypatch.to_string_lossy().into_owned()));
-    env.push(("FOREVER_SERVER_KEY".into(), settings.server.public_key.clone()));
-    env.push(("FOREVER_REGION_GROUP".into(), settings.server.region_group.to_string()));
-    env.push(("FOREVER_PATCH_LOG".into(), keypatch_log.to_string_lossy().into_owned()));
+    cmd.push(crate::steamos::windows_path(&helper)?);
+    cmd.push(crate::steamos::windows_path(&log)?);
+    cmd.push(crate::steamos::windows_path(&settings.exe())?);
+    cmd.push(settings.server.public_key.clone());
+    cmd.push(settings.server.region_group.to_string());
     let l = &settings.linux;
     if l.gamescope && crate::system::which("gamescope") {
         // gamescope starts its own Xwayland with a US keyboard unless told otherwise
@@ -178,12 +158,17 @@ pub fn spawn(settings: &Settings) -> Result<Child, String> {
         wrapped.extend(cmd);
         cmd = wrapped;
     }
-    crate::system::clean_env(&mut Command::new(&cmd[0]))
+    let output = std::fs::OpenOptions::new().append(true).open(&runner_log).map_err(|e| e.to_string())?;
+    let errors = output.try_clone().map_err(|e| e.to_string())?;
+    let child = crate::system::clean_env(&mut Command::new(&cmd[0]))
         .args(&cmd[1..])
         .envs(env)
+        .stdout(output)
+        .stderr(errors)
         .current_dir(&settings.game_dir)
         .spawn()
-        .map_err(|e| tf("launch_failed", &[&cmd[0], &e]))
+        .map_err(|e| tf("launch_failed", &[&cmd[0], &e]))?;
+    Ok(crate::steamos::Launch { child, log, runner_log })
 }
 
 #[cfg(test)]

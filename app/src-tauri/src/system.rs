@@ -453,7 +453,7 @@ mod imp {
             .then(|| format!("{}_{}.UTF-8", &locale[..2], &locale[2..]))
     }
 
-    /// Command that runs a Windows program in the prefix (umu-run + Proton, or wine), with its environment.
+    /// Command that runs a game in the selected Proton prefix, or system Wine.
     pub fn runner(settings: &Settings) -> Result<(Vec<String>, Vec<(String, String)>), String> {
         runner_inner(settings, false)
     }
@@ -482,18 +482,15 @@ mod imp {
         if !proton.is_file() {
             return Err(tf("proton_not_found", &[&l.runner]));
         }
-        // No umu-run: it wraps Proton in the Steam Runtime/pressure-vessel, where the game process
-        // is no longer reachable from the launcher (Yama ptrace_scope=1) and the key patcher cannot
-        // write the server key. `runinprefix` keeps the game in the launcher's process tree.
-        // SteamOS: Proton from Steam started directly; the Wine prefix is <prefix>/pfx.
-        // `runinprefix` runs wine itself instead of going through the Steam runtime/pressure-vessel:
-        // the game stays a child of the launcher, so /proc/<pid>/mem is writable (Yama ptrace_scope=1)
-        // and the key patcher can reach the client. The runtime also hides the process in its own
-        // namespace on some SteamOS setups.
+        // `run` performs Proton's game/prefix setup; `runinprefix` is for registry tools only.
+        // The helper launches WoW from inside this session, so neither Yama ancestry nor host
+        // /proc visibility is part of the key patching mechanism.
         env.push(("STEAM_COMPAT_DATA_PATH".into(), l.prefix.clone()));
         env.push(("STEAM_COMPAT_CLIENT_INSTALL_PATH".into(), steam_root().to_string_lossy().into_owned()));
-        let _ = in_prefix;
-        Ok((vec![proton.to_string_lossy().into_owned(), "runinprefix".into()], env))
+        if !in_prefix {
+            env.push(("STEAM_COMPAT_INSTALL_PATH".into(), settings.game_dir.clone()));
+        }
+        Ok((vec![proton.to_string_lossy().into_owned(), if in_prefix { "runinprefix" } else { "run" }.into()], env))
     }
 
     /// Runs a Windows program (e.g. reg.exe) in the prefix and waits for it.
