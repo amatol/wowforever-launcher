@@ -404,12 +404,13 @@ async function runUpdate(prefix, command, startKey) {
 
 async function runVerify() {
   if (updating) return;
+  if (!confirm(t('clientRestoreConfirm', { size: clientStatus ? formatBytes(clientStatus.totalBytes) : '~56 GB' }))) return;
   updating = true;
   updatePlayButton();
   $('update-progress').hidden = false;
   $('update-bar').style.width = '0%';
-  $('update-detail').textContent = t('clientCheckingStart');
-  $('client-notice').textContent = t('clientCheckingStart');
+  $('update-detail').textContent = t('clientRestoringStart');
+  $('client-notice').textContent = t('clientRestoringStart');
   $('client-notice').hidden = false;
   try {
     await invoke('verify_client');

@@ -188,6 +188,12 @@ fn file_is_current(path: &Path, file: &ManifestFile, full: bool) -> bool {
     file_matches(path, file.size, &file.sha256, full || file.verify_sha256)
 }
 
+/// Игра меняет не только содержимое, но и имена поколений индексов.
+/// После установки снимка отдельные .idx нельзя проверять или восстанавливать.
+fn is_snapshot_index(manifest: &ClientManifest, path: &str) -> bool {
+    !manifest.data_revision.is_empty() && path.starts_with("Data/") && path.ends_with(".idx")
+}
+
 pub async fn client_status(settings: &Settings) -> Result<ClientStatus, String> {
     let manifest = fetch_client_manifest(settings).await?;
     let root = client_root(settings)?;
@@ -197,6 +203,7 @@ pub async fn client_status(settings: &Settings) -> Result<ClientStatus, String> 
     let mut changed_files = 0usize;
     let mut changed_bytes = 0u64;
     for file in &manifest.files {
+        if is_snapshot_index(&manifest, &file.path) { continue; }
         let path = root.join(safe_relative(&file.path)?);
         if !file_is_current(&path, file, false) {
             changed_files += 1;
@@ -204,6 +211,7 @@ pub async fn client_status(settings: &Settings) -> Result<ClientStatus, String> 
         }
     }
     for removed in &manifest.removed_files {
+        if !manifest.data_revision.is_empty() && removed.starts_with("Data/") { continue; }
         if root.join(safe_relative(removed)?).exists() {
             changed_files += 1;
         }
@@ -274,6 +282,7 @@ async fn update_client_inner(
         );
     }
     for (index, file) in manifest.files.iter().enumerate() {
+        if is_snapshot_index(&manifest, &file.path) { continue; }
         let relative = safe_relative(&file.path)?;
         let path = root.join(&relative);
         let matches = if full && file.full_check {
@@ -364,6 +373,7 @@ async fn update_client_inner(
     let has_stale = manifest
         .removed_files
         .iter()
+        .filter(|path| manifest.data_revision.is_empty() || !path.starts_with("Data/"))
         .any(|path| safe_relative(path).map(|value| root.join(value).exists()).unwrap_or(false));
 
     if entries.is_empty() && local == manifest.version && !has_stale {
@@ -374,6 +384,7 @@ async fn update_client_inner(
     download_entries(app, "client", &root, entries, DOWNLOAD_CONCURRENCY).await?;
 
     for removed in &manifest.removed_files {
+        if !manifest.data_revision.is_empty() && removed.starts_with("Data/") { continue; }
         let path = root.join(safe_relative(removed)?);
         if path.is_file() {
             let _ = std::fs::remove_file(&path);
@@ -445,9 +456,12 @@ pub async fn install_client(
 
 fn needs_data_bundle(root: &Path, manifest: &ClientManifest) -> bool {
     !manifest.data_revision.is_empty()
-        && std::fs::read_to_string(root.join(".forever_data_revision"))
+        && (std::fs::read_to_string(root.join(".forever_data_revision"))
             .map(|s| s.trim() != manifest.data_revision)
             .unwrap_or(true)
+            || manifest.files.iter().any(|file| file.path.starts_with("Data/")
+                && !is_snapshot_index(manifest, &file.path)
+                && !root.join(&file.path).is_file()))
 }
 
 /// CASC нельзя обновлять поверх произвольной локальной раскладки.
@@ -753,6 +767,31 @@ mod tests {
         assert!(!needs_data_bundle(&root, &manifest));
         std::fs::remove_file(root.join(".forever_data_revision")).unwrap();
         std::fs::remove_dir(root).unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn snapshot_ignores_renamed_indices_but_restores_missing_archives() {
+        let path = temp_file(b"marker");
+        let root = path.with_extension("client");
+        std::fs::create_dir_all(root.join("Data/data")).unwrap();
+        std::fs::write(root.join(".forever_data_revision"), "fixed\n").unwrap();
+        let mut manifest: ClientManifest = serde_json::from_str(r#"{"version":"v","data_revision":"fixed","files":[]}"#).unwrap();
+        manifest.files.push(manifest_file("Data/data/000000000e.idx", 99, "old"));
+        manifest.files.push(manifest_file("Data/wowf/000000000e.idx", 99, "old"));
+        manifest.files.push(manifest_file("Data/ecache/000000000e.idx", 99, "old"));
+        manifest.files.push(manifest_file("Data/data/data.000", 99, "old"));
+        // Старых имён нет; игра создала другое поколение и изменила архив.
+        std::fs::write(root.join("Data/data/000000000f.idx"), "new index").unwrap();
+        std::fs::write(root.join("Data/data/data.000"), "modified by game").unwrap();
+        for file in &manifest.files[..3] {
+            assert!(is_snapshot_index(&manifest, &file.path));
+        }
+        assert!(!needs_data_bundle(&root, &manifest));
+        assert!(!is_snapshot_index(&manifest, "_forever_/Wow.exe"));
+        std::fs::remove_file(root.join("Data/data/data.000")).unwrap();
+        assert!(needs_data_bundle(&root, &manifest));
+        std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_file(path).unwrap();
     }
 
