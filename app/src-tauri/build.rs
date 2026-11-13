@@ -65,5 +65,22 @@ fn main() {
         println!("cargo:rustc-check-cfg=cfg(desktop, mobile)");
         return;
     }
+    if std::env::var("TARGET").as_deref() == Ok("x86_64-pc-windows-gnu") {
+        let dll = std::env::var("FOREVER_WEBVIEW2_LOADER").expect("Для автономной MinGW-сборки задайте FOREVER_WEBVIEW2_LOADER (официальный WebView2Loader.dll x64 из webview2-com-sys)");
+        println!("cargo:rerun-if-env-changed=FOREVER_WEBVIEW2_LOADER");
+        println!("cargo:rerun-if-changed=../windows/webview-loader.c");
+        println!("cargo:rerun-if-changed={dll}");
+        let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+        let bytes = std::fs::read(dll).unwrap();
+        let array = bytes.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(",");
+        std::fs::write(out.join("webview-loader-bytes.h"), format!("static const unsigned char loader_bytes[] = {{{array}}};")).unwrap();
+        let status = Command::new("x86_64-w64-mingw32-gcc").args(["-O2", "-c", "../windows/webview-loader.c", "-I"]).arg(&out).arg("-o").arg(out.join("webview-loader.o")).status().unwrap();
+        assert!(status.success(), "Не удалось встроить WebView2Loader");
+        println!("cargo:rustc-link-arg={}", out.join("webview-loader.o").display());
+        println!("cargo:rustc-link-arg=-lkernel32");
+        for name in ["CompareBrowserVersions", "CreateCoreWebView2Environment", "CreateCoreWebView2EnvironmentWithOptions", "GetAvailableCoreWebView2BrowserVersionString", "GetAvailableCoreWebView2BrowserVersionStringWithOptions"] {
+            println!("cargo:rustc-link-arg=-Wl,--wrap={name}");
+        }
+    }
     tauri_build::build()
 }

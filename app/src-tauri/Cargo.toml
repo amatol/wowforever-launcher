@@ -1,13 +1,13 @@
 [package]
 name = "forever-ai-launcher"
-version = "1.4.10"
+version = "1.4.12"
 description = "Дримворлд Навсегда - лаунчер WoW Forever (TrinityCore)"
 edition = "2021"
 publish = false
 
 [lib]
 name = "forever_launcher_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

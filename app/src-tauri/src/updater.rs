@@ -39,6 +39,9 @@ fn default_true() -> bool {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ClientManifest {
     pub version: String,
+    /// Ревизия неизменяемого набора CASC: меняется даже при том же build.
+    #[serde(default)]
+    pub data_revision: String,
     #[serde(default)]
     pub build: String,
     #[serde(default)]
@@ -205,7 +208,7 @@ pub async fn client_status(settings: &Settings) -> Result<ClientStatus, String> 
             changed_files += 1;
         }
     }
-    if build_differs {
+    if build_differs || needs_data_bundle(&root, &manifest) {
         // A new game build can change any CASC archive. Only the .build.info
         // marker is not enough: request a full client replacement.
         changed_files = manifest.files.len();
@@ -243,6 +246,9 @@ async fn update_client_inner(
 ) -> Result<(), String> {
     let manifest = fetch_client_manifest(settings).await?;
     let root = client_root(settings)?;
+    if needs_data_bundle(&root, &manifest) || (full && !manifest.data_revision.is_empty()) {
+        return replace_client_bundle(app, &root, &manifest).await;
+    }
     let local = local_version(&root);
     let local_build = crate::config::installed_version(&root.join("_forever_")).unwrap_or_default();
     let build_differs = !manifest.build.is_empty() && local_build != manifest.build;
@@ -410,6 +416,9 @@ pub async fn install_client(
     let manifest = fetch_client_manifest(settings).await?;
     std::fs::create_dir_all(root)
         .map_err(|error| format!("Не удалось создать папку {}: {error}", root.display()))?;
+    if needs_data_bundle(root, &manifest) {
+        return replace_client_bundle(app, root, &manifest).await;
+    }
     let mut entries = Vec::new();
     for file in &manifest.files {
         let relative = safe_relative(&file.path)?;
@@ -431,6 +440,75 @@ pub async fn install_client(
     std::fs::write(root.join(".launcher_version"), format!("{}\n", manifest.version))
         .map_err(|error| format!("Не удалось записать версию клиента: {error}"))?;
     emit(app, "client", done_event(0, 0, 0, 0, "Клиент установлен"));
+    Ok(())
+}
+
+fn needs_data_bundle(root: &Path, manifest: &ClientManifest) -> bool {
+    !manifest.data_revision.is_empty()
+        && std::fs::read_to_string(root.join(".forever_data_revision"))
+            .map(|s| s.trim() != manifest.data_revision)
+            .unwrap_or(true)
+}
+
+/// CASC нельзя обновлять поверх произвольной локальной раскладки.
+/// Сначала скачиваем и проверяем новый набор, затем заменяем Data целиком.
+async fn replace_client_bundle(
+    app: &AppHandle,
+    root: &Path,
+    manifest: &ClientManifest,
+) -> Result<(), String> {
+    if manifest.data_revision.len() > 80
+        || !manifest.data_revision.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+    {
+        return Err("Некорректная ревизия данных клиента".into());
+    }
+    let stage = root.join(format!(".forever-update-{}", manifest.data_revision));
+    let backup = root.join(format!(".forever-old-data-{}", manifest.data_revision));
+    // Остаток незавершённой замены не удаляем: в нём могут быть единственные данные.
+    if backup.exists() {
+        return Err(format!("Обнаружена резервная папка {}. Сохраните её и восстановите Data перед повторным обновлением.", backup.display()));
+    }
+    std::fs::create_dir_all(&stage).map_err(|e| e.to_string())?;
+    let mut entries = Vec::new();
+    for file in &manifest.files {
+        let path = stage.join(safe_relative(&file.path)?);
+        let size = file.size;
+        let sha = file.sha256.clone();
+        let valid = tokio::task::spawn_blocking(move || file_matches(&path, size, &sha, true))
+            .await.map_err(|e| e.to_string())?;
+        if !valid {
+            entries.push(DownloadEntry { path: file.path.clone(), url: file.http_url.clone(), size, sha256: file.sha256.clone() });
+        }
+    }
+    download_entries(app, "client", &stage, entries, DOWNLOAD_CONCURRENCY).await?;
+    if !stage.join("Data/data").is_dir() {
+        return Err("Манифест не содержит полный набор Data/data".into());
+    }
+    let had_data = root.join("Data").exists();
+    if had_data {
+        std::fs::rename(root.join("Data"), &backup).map_err(|e| format!("Не удалось сохранить старую Data: {e}"))?;
+    }
+    if let Err(e) = std::fs::rename(stage.join("Data"), root.join("Data")) {
+        if had_data { let _ = std::fs::rename(&backup, root.join("Data")); }
+        return Err(format!("Не удалось установить новую Data: {e}"));
+    }
+    // Только файлы манифеста: WTF, аддоны и пользовательские настройки не трогаем.
+    for file in &manifest.files {
+        if file.path.starts_with("Data/") { continue; }
+        let relative = safe_relative(&file.path)?;
+        let destination = root.join(&relative);
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::copy(stage.join(relative), destination).map_err(|e| format!("{}: {e}", file.path))?;
+    }
+    // Маркер записывается только после успешной установки всего набора.
+    std::fs::write(root.join(".forever_data_revision"), format!("{}\n", manifest.data_revision)).map_err(|e| e.to_string())?;
+    std::fs::write(root.join(".launcher_version"), format!("{}\n", manifest.version)).map_err(|e| e.to_string())?;
+    // Это только созданные нами служебные папки, не пользовательские каталоги.
+    if had_data { let _ = std::fs::remove_dir_all(&backup); }
+    let _ = std::fs::remove_dir_all(&stage);
+    emit(app, "client", done_event(0, 0, 0, 0, "Полный набор клиента обновлён"));
     Ok(())
 }
 
@@ -658,6 +736,24 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, contents).unwrap();
         path
+    }
+
+    #[test]
+    fn casc_revision_requires_replacement_even_when_game_build_matches() {
+        let path = temp_file(b"marker");
+        let root = path.with_extension("client");
+        std::fs::create_dir(&root).unwrap();
+        let mut manifest: ClientManifest = serde_json::from_str(r#"{"version":"new","build":"1.60.1.70888","data_revision":"70888-fixed","files":[]}"#).unwrap();
+        assert!(needs_data_bundle(&root, &manifest));
+        std::fs::write(root.join(".forever_data_revision"), "old\n").unwrap();
+        assert!(needs_data_bundle(&root, &manifest));
+        std::fs::write(root.join(".forever_data_revision"), "70888-fixed\n").unwrap();
+        assert!(!needs_data_bundle(&root, &manifest));
+        manifest.data_revision.clear();
+        assert!(!needs_data_bundle(&root, &manifest));
+        std::fs::remove_file(root.join(".forever_data_revision")).unwrap();
+        std::fs::remove_dir(root).unwrap();
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

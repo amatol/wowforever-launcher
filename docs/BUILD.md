@@ -1,5 +1,27 @@
 # Сборка лаунчера
 
+## Локальная сборка MinGW (Linux → Windows)
+
+Для автономного EXE нужно встроить официальный `WebView2Loader.dll`
+из x64-каталога зависимости `webview2-com-sys`. Без этого обычная GNU-сборка
+создаёт EXE с внешней DLL, который нельзя публиковать как одиночный файл.
+
+```bash
+FOREVER_WEBVIEW2_LOADER=/path/to/webview2-com-sys/x64/WebView2Loader.dll \
+TMPDIR=/var/tmp cargo build --release --target x86_64-pc-windows-gnu
+```
+
+Перед публикацией проверить `objdump -p ...exe`: среди импортов не должно
+быть `WebView2Loader.dll` или DLL самого лаунчера. MSVC-сборки используют
+штатный статический загрузчик и не требуют этой переменной.
+
+## Ревизии клиента
+
+С версии 1.4.11 поле `data_revision` заставляет обновлять весь набор
+даже при том же `build`. Сначала загрузка и SHA-256 в служебной папке,
+затем замена Data целиком, и только после успеха запись маркера ревизии.
+Индексы входят в снимок; WTF и аддоны остаются пользовательскими.
+
 ## GitHub Actions
 
 Workflow: `.github/workflows/launcher.yml` (Windows only).
