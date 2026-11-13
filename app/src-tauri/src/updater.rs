@@ -43,12 +43,21 @@ pub struct ClientManifest {
     #[serde(default)]
     pub data_revision: String,
     #[serde(default)]
+    pub reuse_manifest: Option<ReuseManifestRef>,
+    #[serde(default)]
     pub build: String,
     #[serde(default)]
     pub product: String,
     pub files: Vec<ManifestFile>,
     #[serde(default)]
     pub removed_files: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ReuseManifestRef {
+    pub url: String,
+    pub size: u64,
+    pub sha256: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -483,6 +492,9 @@ async fn replace_client_bundle(
         return Err(format!("Обнаружена резервная папка {}. Сохраните её и восстановите Data перед повторным обновлением.", backup.display()));
     }
     std::fs::create_dir_all(&stage).map_err(|e| e.to_string())?;
+    if manifest.reuse_manifest.is_some() && root.join("Data").is_dir() {
+        reuse_archives(app, root, &stage, manifest).await?;
+    }
     let mut entries = Vec::new();
     for file in &manifest.files {
         let path = stage.join(safe_relative(&file.path)?);
@@ -491,6 +503,19 @@ async fn replace_client_bundle(
         let valid = tokio::task::spawn_blocking(move || file_matches(&path, size, &sha, true))
             .await.map_err(|e| e.to_string())?;
         if !valid {
+            // Неизменившиеся EXE, конфиги и мелкие файлы тоже не скачиваем.
+            let source = root.join(safe_relative(&file.path)?);
+            let destination = stage.join(safe_relative(&file.path)?);
+            let sha = file.sha256.clone();
+            let copied = tokio::task::spawn_blocking(move || -> Result<bool, String> {
+                if !file_matches(&source, size, &sha, true) { return Ok(false); }
+                if let Some(parent) = destination.parent() { std::fs::create_dir_all(parent).map_err(|e|e.to_string())?; }
+                std::fs::copy(source, &destination).map_err(|e|e.to_string())?;
+                // Источник мог измениться во время копирования.
+                if file_matches(&destination, size, &sha, true) { Ok(true) }
+                else { std::fs::remove_file(destination).map_err(|e|e.to_string())?; Ok(false) }
+            }).await.map_err(|e|e.to_string())??;
+            if copied { continue; }
             entries.push(DownloadEntry { path: file.path.clone(), url: file.http_url.clone(), size, sha256: file.sha256.clone() });
         }
     }
@@ -523,6 +548,92 @@ async fn replace_client_bundle(
     if had_data { let _ = std::fs::remove_dir_all(&backup); }
     let _ = std::fs::remove_dir_all(&stage);
     emit(app, "client", done_event(0, 0, 0, 0, "Полный набор клиента обновлён"));
+    Ok(())
+}
+
+async fn bounded_body(mut response: reqwest::Response, limit: u64) -> Result<Vec<u8>, String> {
+    if response.content_length().map(|n|n > limit).unwrap_or(false) { return Err("Ответ больше ожидаемого".into()); }
+    let mut data = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e|e.to_string())? {
+        if data.len() as u64 + chunk.len() as u64 > limit { return Err("Превышен размер ответа".into()); }
+        data.extend_from_slice(&chunk);
+    }
+    Ok(data)
+}
+
+fn reuse_event(app: &AppHandle, message: String, current: usize, total: usize, downloaded: u64) {
+    emit(app, "client", UpdateEvent { kind: "reuse".into(), file: String::new(), current, total,
+        downloaded, total_bytes: 0, percent: if total == 0 { 0.0 } else { current as f64 / total as f64 * 100.0 }, message });
+}
+
+async fn reuse_archives(app: &AppHandle, root: &Path, stage: &Path, manifest: &ClientManifest) -> Result<(), String> {
+    use crate::casc_reuse;
+    let reference = manifest.reuse_manifest.as_ref().ok_or("Нет рецепта")?;
+    if reference.size == 0 || reference.size > 128 * 1024 * 1024 { return Err("Недопустимый размер рецепта".into()); }
+    let client = reqwest::Client::builder().connect_timeout(Duration::from_secs(30)).timeout(Duration::from_secs(120)).build().map_err(|e|e.to_string())?;
+    reuse_event(app, "Читаем карту блоков обновления…".into(), 0, 0, 0);
+    let response = client.get(&reference.url).header("Accept-Encoding", "identity").send().await.map_err(|e|e.to_string())?.error_for_status().map_err(|e|e.to_string())?;
+    let bytes = bounded_body(response, reference.size).await?;
+    if bytes.len() as u64 != reference.size || hex::encode(Sha256::digest(&bytes)) != reference.sha256 { return Err("SHA-256 карты блоков не совпадает".into()); }
+    let recipe: casc_reuse::Recipe = serde_json::from_slice(&bytes).map_err(|e|e.to_string())?;
+    casc_reuse::validate(&recipe, &manifest.data_revision)?;
+    for archive in &recipe.files {
+        let file = manifest.files.iter().find(|f|f.path == archive.path).ok_or("Архив не входит в манифест")?;
+        if file.size != archive.size || file.sha256 != archive.sha256 { return Err("Карта блоков относится к другому снимку".into()); }
+    }
+    let source = root.to_path_buf(); let scan_recipe = recipe.clone(); let scan_app = app.clone();
+    let index = tokio::task::spawn_blocking(move || casc_reuse::scan(&source, &scan_recipe, |path, read| {
+        reuse_event(&scan_app, format!("Проверяем локальные архивы: {:.1} ГиБ · {path}", read as f64 / 1073741824.0), 0, 0, 0);
+    })).await.map_err(|e|e.to_string())??;
+    let index = Arc::new(index);
+    // При пустом/неподходящем клиенте эффективнее обычная параллельная загрузка.
+    if index.is_empty() { return Ok(()); }
+    let mut downloaded = 0u64; let mut reused = 0u64;
+    for (number, archive) in recipe.files.iter().enumerate() {
+        let destination = stage.join(&archive.path);
+        let check_path = destination.clone(); let sha = archive.sha256.clone(); let size = archive.size;
+        if tokio::task::spawn_blocking(move ||file_matches(&check_path, size, &sha, true)).await.map_err(|e|e.to_string())? { continue; }
+        reuse_event(app, format!("Собираем {} из локальных блоков…",archive.path), number, recipe.files.len(), downloaded);
+        let build_stage = stage.to_path_buf(); let build_archive = archive.clone(); let build_index = index.clone();
+        let (temporary, ranges, copied) = tokio::task::spawn_blocking(move || casc_reuse::assemble(&build_stage, &build_archive, &build_index)).await.map_err(|e|e.to_string())??;
+        reused += copied;
+        let url = &manifest.files.iter().find(|f|f.path == archive.path).ok_or("Нет URL архива")?.http_url;
+        for range in ranges {
+            let mut result = Err("Не удалось скачать диапазон".to_string());
+            for _ in 0..3 {
+                result = async {
+                    let end = range.offset.checked_add(range.size).ok_or("Переполнение диапазона")? - 1;
+                    let response = client.get(url).header("Accept-Encoding", "identity")
+                        .header("Range", format!("bytes={}-{end}", range.offset)).send().await.map_err(|e|e.to_string())?;
+                    let expected = format!("bytes {}-{end}/{}",range.offset,archive.size);
+                    if response.status() != reqwest::StatusCode::PARTIAL_CONTENT
+                        || response.headers().get("Content-Range").and_then(|h|h.to_str().ok()) != Some(expected.as_str()) {
+                        return Err("Сервер не подтвердил точный диапазон; полная загрузка автоматически не запускается".into());
+                    }
+                    let data = bounded_body(response, range.size).await?;
+                    casc_reuse::verify_range(&data, &range)?;
+                    Ok(data)
+                }.await;
+                if result.is_ok() { break; }
+            }
+            let data = result?;
+            let path = temporary.clone(); let offset = range.offset;
+            tokio::task::spawn_blocking(move || -> Result<(), String> {
+                use std::io::{Seek, SeekFrom, Write};
+                let mut file = std::fs::OpenOptions::new().write(true).open(path).map_err(|e|e.to_string())?;
+                file.seek(SeekFrom::Start(offset)).and_then(|_|file.write_all(&data)).map_err(|e|e.to_string())
+            }).await.map_err(|e|e.to_string())??;
+            downloaded += range.size;
+            reuse_event(app, format!("Повторно использовано {:.2} ГиБ; загружено {:.2} МиБ",reused as f64/1073741824.0,downloaded as f64/1048576.0),number,recipe.files.len(),downloaded);
+        }
+        let path = temporary.clone(); let sha = archive.sha256.clone();
+        let valid = tokio::task::spawn_blocking(move ||file_matches(&path, size, &sha, true)).await.map_err(|e|e.to_string())?;
+        if !valid { return Err(format!("Итоговый SHA-256 архива {} не совпадает; старый клиент не изменён",archive.path)); }
+        // На Windows rename не заменяет существующий файл; удаляем только неверный staging-файл.
+        if destination.exists() { std::fs::remove_file(&destination).map_err(|e|e.to_string())?; }
+        std::fs::rename(temporary, destination).map_err(|e|e.to_string())?;
+    }
+    reuse_event(app, format!("Архивы готовы: повторно использовано {:.2} ГиБ, загружено {:.2} МиБ",reused as f64/1073741824.0,downloaded as f64/1048576.0),recipe.files.len(),recipe.files.len(),downloaded);
     Ok(())
 }
 

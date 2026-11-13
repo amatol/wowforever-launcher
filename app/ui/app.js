@@ -300,6 +300,15 @@ async function installLauncherUpdate() {
 }
 
 function handleUpdateEvent(payload) {
+  if (payload.kind === 'reuse') {
+    $('update-progress').hidden = false;
+    $('update-bar').style.width = `${Math.max(0, Math.min(100, Number(payload.percent) || 0))}%`;
+    $('update-detail').textContent = payload.message || '';
+    $('client-notice').textContent = payload.message || '';
+    $('client-notice').hidden = false;
+    if (autoPlayActive) autoDetail(payload.message || '');
+    return;
+  }
   const progressKey = 'clientProgress';
   const startKey = 'clientStarting';
   const doneKey = 'clientDone';

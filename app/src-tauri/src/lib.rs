@@ -1,4 +1,5 @@
 mod api;
+mod casc_reuse;
 mod config;
 // macOS: only the entropy is used (see macos.rs); the rest is kept for its tests
 #[cfg_attr(target_os = "macos", allow(dead_code))]
