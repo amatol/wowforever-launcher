@@ -46,25 +46,6 @@ fn rewrite_values(path: &Path, text: &str, wanted: &[(&str, String)]) -> Result<
         .map_err(|error| format!("{} : {error}", path.display()))
 }
 
-/// One-time cleanup of the client ADB cache after the 0.1.34 hotfix import.
-/// The DB2/hotfix cache can contain records without localized strings and
-/// crash the client on entering the world; the client rebuilds it itself.
-pub fn clear_cache_once(settings: &Settings) -> Result<(), String> {
-    let marker = crate::config::config_dir().join("cache-cleared-20261110-hotfixes");
-    if marker.exists() {
-        return Ok(());
-    }
-    let cache = Path::new(&settings.game_dir).join("Cache");
-    if cache.exists() {
-        std::fs::remove_dir_all(&cache)
-            .map_err(|error| format!("{} : {error}", cache.display()))?;
-    }
-    if let Some(parent) = marker.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    std::fs::write(&marker, b"1").map_err(|error| error.to_string())
-}
-
 /// Stores the login ticket where the client reads it with -launcherlogin.
 #[cfg(windows)]
 pub fn write_launch_options(_settings: &Settings, portal: &str, ticket: &str, game_account: &str) -> Result<(), String> {
@@ -134,7 +115,7 @@ pub fn spawn(settings: &Settings) -> Result<Child, String> {
 pub fn spawn(settings: &Settings) -> Result<crate::steamos::Launch, String> {
     // Validate before starting either the helper or the game.
     crate::patcher::Patcher::new(&settings.server.public_key, settings.server.region_group)?;
-    let (helper, log, runner_log, netdelay, ready) = crate::steamos::prepare()?;
+    let (helper, log, runner_log) = crate::steamos::prepare()?;
     let (runner, mut env) = crate::system::runner(settings)?;
     let mut cmd: Vec<String> = runner;
     cmd.push(crate::steamos::windows_path(&helper)?);
@@ -142,17 +123,6 @@ pub fn spawn(settings: &Settings) -> Result<crate::steamos::Launch, String> {
     cmd.push(crate::steamos::windows_path(&settings.exe())?);
     cmd.push(settings.server.public_key.clone());
     cmd.push(settings.server.region_group.to_string());
-    let mut preload = netdelay.to_string_lossy().into_owned();
-    if let Ok(existing) = std::env::var("LD_PRELOAD") {
-        if !existing.trim().is_empty() {
-            preload = format!("{preload}:{existing}");
-        }
-    }
-    env.push(("LD_PRELOAD".into(), preload));
-    env.push(("FOREVER_READY_FILE".into(), ready.to_string_lossy().into_owned()));
-    env.push(("FOREVER_READY_WIN".into(), crate::steamos::windows_path_allow_missing(&ready)?));
-    env.push(("FOREVER_WORLD_PORT".into(), settings.server.world_port.to_string()));
-    env.push(("FOREVER_NET_TIMEOUT".into(), "15000".into()));
     let l = &settings.linux;
     if l.gamescope && crate::system::which("gamescope") {
         // gamescope starts its own Xwayland with a US keyboard unless told otherwise

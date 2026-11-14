@@ -1,5 +1,5 @@
 //! Native launcher / Wine helper boundary. The key patcher runs inside the game's
-//! Wine session; the only host-side preload is a narrow connect gate for the world port.
+//! Wine session; there is no host-side preload or network hook.
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -7,7 +7,6 @@ use std::process::Child;
 use std::time::{Duration, Instant};
 
 const HELPER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/forever-keypatch.exe"));
-const NETDELAY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libforever_netdelay.so"));
 
 pub struct Launch {
     pub child: Child,
@@ -17,18 +16,6 @@ pub struct Launch {
 
 pub fn windows_path(path: &Path) -> Result<String, String> {
     let absolute = std::fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    windows_path_allow_missing(&absolute)
-}
-
-/// Same Z: mapping, but the target may not exist yet (e.g. the helper's ready marker).
-pub fn windows_path_allow_missing(path: &Path) -> Result<String, String> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map_err(|e| e.to_string())?
-            .join(path)
-    };
     let text = absolute.to_str().ok_or("Wine requires a UTF-8 path")?;
     if !text.starts_with('/') || text.contains(['\\', '"', '\n', '\r']) {
         return Err(format!("Unsupported Wine path: {}", absolute.display()));
@@ -37,49 +24,64 @@ pub fn windows_path_allow_missing(path: &Path) -> Result<String, String> {
     Ok(format!("Z:{}", text.replace('/', "\\")))
 }
 
-pub fn prepare() -> Result<(PathBuf, PathBuf, PathBuf, PathBuf, PathBuf), String> {
+fn install_helper() -> Result<PathBuf, String> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    let dir = crate::config::config_dir().join("runs").join(format!(
-        "{}-{:016x}",
-        std::process::id(),
-        rand::random::<u64>()
-    ));
+    let dir = crate::config::data_dir().join("bin");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
-        .map_err(|e| e.to_string())?;
-    let helper = dir.join("forever-keypatch.exe");
-    // Per-launch immutable executable and logs: no overwrite of a running helper or stale READY.
-    OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(0o600)
-        .open(&helper)
-        .and_then(|mut f| std::io::Write::write_all(&mut f, HELPER))
-        .map_err(|e| e.to_string())?;
-    let log = dir.join("keypatch.log");
-    OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(0o600)
-        .open(&log)
-        .map_err(|e| e.to_string())?;
-    let runner_log = dir.join("proton.log");
-    OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(0o600)
-        .open(&runner_log)
-        .map_err(|e| e.to_string())?;
-    let netdelay = dir.join("libforever_netdelay.so");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
+    let path = dir.join("forever-keypatch.exe");
+    if std::fs::read(&path).ok().as_deref() == Some(HELPER) {
+        return Ok(path);
+    }
+    // Atomic replacement: the helper may still be running from a previous launch.
+    let temporary = dir.join("forever-keypatch.exe.new");
+    let _ = std::fs::remove_file(&temporary);
     OpenOptions::new()
         .create_new(true)
         .write(true)
         .mode(0o700)
-        .open(&netdelay)
-        .and_then(|mut f| std::io::Write::write_all(&mut f, NETDELAY))
+        .open(&temporary)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, HELPER))
         .map_err(|e| e.to_string())?;
-    let ready = dir.join("ready");
-    Ok((helper, log, runner_log, netdelay, ready))
+    std::fs::rename(&temporary, &path).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
+/// Remove files created by older versions. Only known launcher-owned paths are touched.
+fn cleanup_legacy() {
+    let config = crate::config::config_dir();
+    let _ = std::fs::remove_dir_all(config.join("runs"));
+    for name in ["libforever_keypatch.so", "keypatch.log", "keystore-scan.txt"] {
+        let _ = std::fs::remove_file(config.join(name));
+    }
+    if let Ok(entries) = std::fs::read_dir(&config) {
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with("cache-cleared-") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
+pub fn prepare() -> Result<(PathBuf, PathBuf, PathBuf), String> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    cleanup_legacy();
+    let helper = install_helper()?;
+    let logs = crate::config::data_dir().join("logs");
+    std::fs::create_dir_all(&logs).map_err(|e| e.to_string())?;
+    std::fs::set_permissions(&logs, std::fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
+    let log = logs.join("keypatch.log");
+    let runner_log = logs.join("proton.log");
+    for path in [&log, &runner_log] {
+        OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok((helper, log, runner_log))
 }
 
 #[derive(Default)]
