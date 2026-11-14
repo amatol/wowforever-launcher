@@ -36,6 +36,40 @@ fn default_true() -> bool {
     true
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct CdnInfo {
+    #[serde(default)]
+    pub product: String,
+    #[serde(default)]
+    pub build_config: String,
+    #[serde(default)]
+    pub cdn_config: String,
+    #[serde(default)]
+    pub cdn_path: String,
+    #[serde(default)]
+    pub cdn_hosts: Vec<String>,
+}
+
+/// Small server manifest: the build the realm currently runs.
+/// `manifest.json` remains the file list and the fallback source of truth.
+#[derive(Clone, Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct BuildManifest {
+    #[serde(default)]
+    pub build: String,
+    #[serde(default)]
+    pub build_id: u64,
+    #[serde(default)]
+    pub product: String,
+    #[serde(default)]
+    pub cdn: Option<CdnInfo>,
+    #[serde(default)]
+    pub overlay: Vec<String>,
+    #[serde(default)]
+    pub fallback_manifest: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ClientManifest {
     pub version: String,
@@ -91,6 +125,8 @@ pub struct ClientStatus {
 struct DownloadEntry {
     path: String,
     url: String,
+    /// Blizzard CDN URLs tried before `url`. Overlay files never get one.
+    cdn_urls: Vec<String>,
     size: u64,
     sha256: String,
 }
@@ -155,6 +191,84 @@ async fn fetch_client_manifest(settings: &Settings) -> Result<ClientManifest, St
     get_json(&url).await
 }
 
+/// The build manifest is optional so old servers without it keep working.
+async fn fetch_build_manifest(settings: &Settings) -> Option<BuildManifest> {
+    let Ok(base) = base_url(settings) else { return None };
+    get_json::<BuildManifest>(&format!("{base}/client_build.json")).await.ok()
+}
+
+fn required_build<'a>(build: Option<&'a BuildManifest>, manifest: &'a ClientManifest) -> &'a str {
+    build
+        .map(|value| value.build.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(manifest.build.as_str())
+}
+
+fn is_overlay(path: &str, build: Option<&BuildManifest>) -> bool {
+    // Our files must never come from Blizzard. The prefix is a hard guard, not a setting.
+    if path.starts_with("_forever_/") || path == ".build.info" {
+        return true;
+    }
+    build
+        .map(|value| value.overlay.iter().any(|item| item == path))
+        .unwrap_or(false)
+}
+
+/// Only CDN objects with a content hash in the path can be fetched directly.
+/// Client `.data` archives are CASC containers, not flat files, and stay on our server.
+fn cdn_urls_for(path: &str, build: Option<&BuildManifest>) -> Vec<String> {
+    if is_overlay(path, build) {
+        return Vec::new();
+    }
+    let Some(build) = build else { return Vec::new() };
+    let Some(cdn) = build.cdn.as_ref() else { return Vec::new() };
+    if cdn.cdn_hosts.is_empty() || cdn.cdn_path.trim_matches('/').is_empty() {
+        return Vec::new();
+    }
+    let name = path.rsplit('/').next().unwrap_or("");
+    let (kind, hash) = if path.starts_with("Data/indices/") && name.ends_with(".index") {
+        ("data", name.trim_end_matches(".index"))
+    } else if path.starts_with("Data/config/") && name.len() == 32 {
+        ("config", name)
+    } else {
+        return Vec::new();
+    };
+    if hash.len() != 32 || !hash.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return Vec::new();
+    }
+    let directory = if kind == "data" { "data" } else { "config" };
+    let suffix = if kind == "data" { ".index" } else { "" };
+    let relative = format!(
+        "{}/{}/{}/{}/{hash}{suffix}",
+        cdn.cdn_path.trim_matches('/'),
+        directory,
+        &hash[0..2],
+        &hash[2..4]
+    );
+    cdn.cdn_hosts
+        .iter()
+        .filter(|host| !host.trim().is_empty())
+        .map(|host| {
+            let host = host.trim().trim_end_matches('/');
+            if host.contains("://") {
+                format!("{host}/{relative}")
+            } else {
+                format!("https://{host}/{relative}")
+            }
+        })
+        .collect()
+}
+
+fn entry_for(file: &ManifestFile, build: Option<&BuildManifest>) -> DownloadEntry {
+    DownloadEntry {
+        path: file.path.clone(),
+        url: file.http_url.clone(),
+        cdn_urls: cdn_urls_for(&file.path, build),
+        size: file.size,
+        sha256: file.sha256.clone(),
+    }
+}
+
 fn local_version(root: &Path) -> String {
     std::fs::read_to_string(root.join(".launcher_version"))
         .map(|value| value.trim().to_string())
@@ -205,10 +319,12 @@ fn is_snapshot_index(manifest: &ClientManifest, path: &str) -> bool {
 
 pub async fn client_status(settings: &Settings) -> Result<ClientStatus, String> {
     let manifest = fetch_client_manifest(settings).await?;
+    let build_manifest = fetch_build_manifest(settings).await;
     let root = client_root(settings)?;
     let local = local_version(&root);
     let local_build = crate::config::installed_version(&root.join("_forever_")).unwrap_or_default();
-    let build_differs = !manifest.build.is_empty() && local_build != manifest.build;
+    let wanted_build = required_build(build_manifest.as_ref(), &manifest).to_string();
+    let build_differs = !wanted_build.is_empty() && local_build != wanted_build;
     let mut changed_files = 0usize;
     let mut changed_bytes = 0u64;
     for file in &manifest.files {
@@ -236,7 +352,7 @@ pub async fn client_status(settings: &Settings) -> Result<ClientStatus, String> 
     let up_to_date = changed_files == 0;
     Ok(ClientStatus {
         version: manifest.version,
-        build: manifest.build,
+        build: wanted_build,
         local_version: local,
         local_build,
         total_files: manifest.files.len(),
@@ -262,13 +378,15 @@ async fn update_client_inner(
     full: bool,
 ) -> Result<(), String> {
     let manifest = fetch_client_manifest(settings).await?;
+    let build_manifest = fetch_build_manifest(settings).await;
     let root = client_root(settings)?;
     if needs_data_bundle(&root, &manifest) || (full && !manifest.data_revision.is_empty()) {
-        return replace_client_bundle(app, &root, &manifest).await;
+        return replace_client_bundle(app, &root, &manifest, build_manifest.as_ref()).await;
     }
     let local = local_version(&root);
     let local_build = crate::config::installed_version(&root.join("_forever_")).unwrap_or_default();
-    let build_differs = !manifest.build.is_empty() && local_build != manifest.build;
+    let wanted_build = required_build(build_manifest.as_ref(), &manifest).to_string();
+    let build_differs = !wanted_build.is_empty() && local_build != wanted_build;
     let total_files = manifest.files.len();
     let total_bytes: u64 = manifest.files.iter().map(|file| file.size).sum();
     let mut entries = Vec::new();
@@ -305,12 +423,7 @@ async fn update_client_inner(
             file_is_current(&path, file, full)
         };
         if !matches {
-            entries.push(DownloadEntry {
-                path: file.path.clone(),
-                url: file.http_url.clone(),
-                size: file.size,
-                sha256: file.sha256.clone(),
-            });
+            entries.push(entry_for(file, build_manifest.as_ref()));
         }
         if full {
             checked_bytes = checked_bytes.saturating_add(file.size);
@@ -340,12 +453,7 @@ async fn update_client_inner(
     }
     if build_differs && !entries.iter().any(|entry| entry.path == ".build.info") {
         if let Some(file) = manifest.files.iter().find(|file| file.path == ".build.info") {
-            entries.push(DownloadEntry {
-                path: file.path.clone(),
-                url: file.http_url.clone(),
-                size: file.size,
-                sha256: file.sha256.clone(),
-            });
+            entries.push(entry_for(file, build_manifest.as_ref()));
         }
     }
     // Новая сборка клиента: скачиваем весь набор файлов, иначе CASC
@@ -354,12 +462,7 @@ async fn update_client_inner(
         let mut present: HashSet<String> = entries.iter().map(|entry| entry.path.clone()).collect();
         for file in &manifest.files {
             if present.insert(file.path.clone()) {
-                entries.push(DownloadEntry {
-                    path: file.path.clone(),
-                    url: file.http_url.clone(),
-                    size: file.size,
-                    sha256: file.sha256.clone(),
-                });
+                entries.push(entry_for(file, build_manifest.as_ref()));
             }
         }
     }
@@ -370,12 +473,7 @@ async fn update_client_inner(
         let mut present: HashSet<String> = entries.iter().map(|entry| entry.path.clone()).collect();
         for file in &manifest.files {
             if file.path.starts_with("Data/") && present.insert(file.path.clone()) {
-                entries.push(DownloadEntry {
-                    path: file.path.clone(),
-                    url: file.http_url.clone(),
-                    size: file.size,
-                    sha256: file.sha256.clone(),
-                });
+                entries.push(entry_for(file, build_manifest.as_ref()));
             }
         }
     }
@@ -434,22 +532,18 @@ pub async fn install_client(
     root: &Path,
 ) -> Result<(), String> {
     let manifest = fetch_client_manifest(settings).await?;
+    let build_manifest = fetch_build_manifest(settings).await;
     std::fs::create_dir_all(root)
         .map_err(|error| format!("Не удалось создать папку {}: {error}", root.display()))?;
     if needs_data_bundle(root, &manifest) {
-        return replace_client_bundle(app, root, &manifest).await;
+        return replace_client_bundle(app, root, &manifest, build_manifest.as_ref()).await;
     }
     let mut entries = Vec::new();
     for file in &manifest.files {
         let relative = safe_relative(&file.path)?;
         let path = root.join(&relative);
         if !file_is_current(&path, file, false) {
-            entries.push(DownloadEntry {
-                path: file.path.clone(),
-                url: file.http_url.clone(),
-                size: file.size,
-                sha256: file.sha256.clone(),
-            });
+            entries.push(entry_for(file, build_manifest.as_ref()));
         }
     }
     if entries.is_empty() {
@@ -479,6 +573,7 @@ async fn replace_client_bundle(
     app: &AppHandle,
     root: &Path,
     manifest: &ClientManifest,
+    build_manifest: Option<&BuildManifest>,
 ) -> Result<(), String> {
     if manifest.data_revision.len() > 80
         || !manifest.data_revision.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
@@ -516,7 +611,7 @@ async fn replace_client_bundle(
                 else { std::fs::remove_file(destination).map_err(|e|e.to_string())?; Ok(false) }
             }).await.map_err(|e|e.to_string())??;
             if copied { continue; }
-            entries.push(DownloadEntry { path: file.path.clone(), url: file.http_url.clone(), size, sha256: file.sha256.clone() });
+            entries.push(entry_for(file, build_manifest));
         }
     }
     download_entries(app, "client", &stage, entries, DOWNLOAD_CONCURRENCY).await?;
@@ -660,6 +755,124 @@ fn emit(app: &AppHandle, event: &str, payload: UpdateEvent) {
     let _ = app.emit(event, payload);
 }
 
+async fn download_one(
+    client: &reqwest::Client,
+    url: &str,
+    entry: &DownloadEntry,
+    destination: &Path,
+    temporary: &Path,
+    app: &AppHandle,
+    event_name: &str,
+    total: usize,
+    current: &AtomicUsize,
+    downloaded: &AtomicU64,
+    total_bytes: u64,
+    is_cdn: bool,
+) -> Result<(), String> {
+    let mut written = 0u64;
+    let result = async {
+        let request = client.get(url);
+        // A stalled CDN must fall back to our server instead of blocking the install.
+        let request = if is_cdn { request.timeout(Duration::from_secs(60)) } else { request };
+        let response = request
+            .send()
+            .await
+            .map_err(|error| format!("{}: {error}", entry.path))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(format!("{}: HTTP {status}", entry.path));
+        }
+        let mut stream = response.bytes_stream();
+        let mut file = tokio::fs::File::create(temporary)
+            .await
+            .map_err(|error| format!("{}: {error}", entry.path))?;
+        use tokio::io::AsyncWriteExt;
+        let mut hasher = Sha256::new();
+        let mut last_emit = Instant::now();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| format!("{}: {error}", entry.path))?;
+            file.write_all(&chunk)
+                .await
+                .map_err(|error| format!("{}: {error}", entry.path))?;
+            hasher.update(&chunk);
+            written += chunk.len() as u64;
+            let all = downloaded.fetch_add(chunk.len() as u64, Ordering::Relaxed)
+                + chunk.len() as u64;
+            if last_emit.elapsed() >= Duration::from_millis(300) {
+                last_emit = Instant::now();
+                let done = current.load(Ordering::Relaxed);
+                emit(
+                    app,
+                    event_name,
+                    UpdateEvent {
+                        kind: "progress".into(),
+                        file: entry.path.clone(),
+                        current: done,
+                        total,
+                        downloaded: all,
+                        total_bytes,
+                        percent: if total_bytes > 0 {
+                            (all as f64 / total_bytes as f64 * 100.0).min(99.9)
+                        } else {
+                            0.0
+                        },
+                        message: String::new(),
+                    },
+                );
+            }
+        }
+        file.flush()
+            .await
+            .map_err(|error| format!("{}: {error}", entry.path))?;
+        drop(file);
+        if written != entry.size {
+            return Err(format!(
+                "{}: ожидалось {} байт, получено {}",
+                entry.path, entry.size, written
+            ));
+        }
+        let digest = hex::encode(hasher.finalize());
+        if digest != entry.sha256 {
+            return Err(format!("{}: неверная SHA-256", entry.path));
+        }
+        if destination.exists() {
+            tokio::fs::remove_file(destination)
+                .await
+                .map_err(|error| format!("{}: {error}", entry.path))?;
+        }
+        tokio::fs::rename(temporary, destination)
+            .await
+            .map_err(|error| format!("{}: {error}", entry.path))?;
+        let done = current.fetch_add(1, Ordering::Relaxed) + 1;
+        let all = downloaded.load(Ordering::Relaxed);
+        emit(
+            app,
+            event_name,
+            UpdateEvent {
+                kind: "progress".into(),
+                file: entry.path.clone(),
+                current: done,
+                total,
+                downloaded: all,
+                total_bytes,
+                percent: if total_bytes > 0 {
+                    (all as f64 / total_bytes as f64 * 100.0).min(99.9)
+                } else {
+                    0.0
+                },
+                message: String::new(),
+            },
+        );
+        Ok::<(), String>(())
+    }
+    .await;
+    if result.is_err() {
+        downloaded.fetch_sub(written, Ordering::Relaxed);
+        let _ = tokio::fs::remove_file(temporary).await;
+    }
+    result
+}
+
 async fn download_entries(
     app: &AppHandle,
     event: &str,
@@ -697,6 +910,10 @@ async fn download_entries(
     let app = app.clone();
     let event_name = event.to_string();
 
+    let cdn_ok = Arc::new(AtomicUsize::new(0));
+    let cdn_fallbacks = Arc::new(AtomicUsize::new(0));
+    let cdn_failures = Arc::new(AtomicUsize::new(0));
+    let cdn_disabled = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let tasks = entries.into_iter().map(|entry| {
         let client = client.clone();
         let root = root.clone();
@@ -704,6 +921,10 @@ async fn download_entries(
         let event_name = event_name.clone();
         let current = Arc::clone(&current);
         let downloaded = Arc::clone(&downloaded);
+        let cdn_ok = Arc::clone(&cdn_ok);
+        let cdn_fallbacks = Arc::clone(&cdn_fallbacks);
+        let cdn_failures = Arc::clone(&cdn_failures);
+        let cdn_disabled = Arc::clone(&cdn_disabled);
         async move {
             let relative = safe_relative(&entry.path)?;
             let destination = root.join(&relative);
@@ -719,104 +940,68 @@ async fn download_entries(
                 .unwrap_or("file");
             let temporary = destination.with_file_name(format!(".{file_name}.part"));
 
-            let response = client
-                .get(&entry.url)
-                .send()
+            let mut last_error = None;
+            let cdn_count = if cdn_disabled.load(Ordering::Relaxed) { 0 } else { entry.cdn_urls.len() };
+            for (index, url) in entry.cdn_urls.iter().take(cdn_count).chain(std::iter::once(&entry.url)).enumerate() {
+                match download_one(
+                    &client,
+                    url,
+                    &entry,
+                    &destination,
+                    &temporary,
+                    &app,
+                    &event_name,
+                    total,
+                    &current,
+                    &downloaded,
+                    total_bytes,
+                    index < cdn_count,
+                )
                 .await
-                .map_err(|error| format!("{}: {error}", entry.path))?;
-            let status = response.status();
-            if !status.is_success() {
-                return Err(format!("{}: HTTP {status}", entry.path));
-            }
-            let mut stream = response.bytes_stream();
-            let mut file = tokio::fs::File::create(&temporary)
-                .await
-                .map_err(|error| format!("{}: {error}", entry.path))?;
-            use tokio::io::AsyncWriteExt;
-            let mut hasher = Sha256::new();
-            let mut written = 0u64;
-            let mut last_emit = Instant::now();
-            while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|error| format!("{}: {error}", entry.path))?;
-                file.write_all(&chunk)
-                    .await
-                    .map_err(|error| format!("{}: {error}", entry.path))?;
-                hasher.update(&chunk);
-                written += chunk.len() as u64;
-                let all = downloaded.fetch_add(chunk.len() as u64, Ordering::Relaxed)
-                    + chunk.len() as u64;
-                if last_emit.elapsed() >= Duration::from_millis(300) {
-                    last_emit = Instant::now();
-                    let done = current.load(Ordering::Relaxed);
-                    emit(
-                        &app,
-                        &event_name,
-                        UpdateEvent {
-                            kind: "progress".into(),
-                            file: entry.path.clone(),
-                            current: done,
-                            total,
-                            downloaded: all,
-                            total_bytes,
-                            percent: if total_bytes > 0 {
-                                (all as f64 / total_bytes as f64 * 100.0).min(99.9)
-                            } else {
-                                0.0
-                            },
-                            message: String::new(),
-                        },
-                    );
+                {
+                    Ok(()) => {
+                        if index < cdn_count {
+                            cdn_ok.fetch_add(1, Ordering::Relaxed);
+                        } else if cdn_count > 0 {
+                            cdn_fallbacks.fetch_add(1, Ordering::Relaxed);
+                        }
+                        return Ok::<(), String>(());
+                    }
+                    Err(error) => {
+                        if index + 1 == cdn_count && cdn_count > 0 {
+                            if cdn_failures.fetch_add(1, Ordering::Relaxed) + 1 >= 20 {
+                                cdn_disabled.store(true, Ordering::Relaxed);
+                            }
+                        }
+                        last_error = Some(error);
+                    }
                 }
             }
-            file.flush()
-                .await
-                .map_err(|error| format!("{}: {error}", entry.path))?;
-            drop(file);
-            if written != entry.size {
-                let _ = tokio::fs::remove_file(&temporary).await;
-                return Err(format!(
-                    "{}: ожидалось {} байт, получено {}",
-                    entry.path, entry.size, written
-                ));
-            }
-            let digest = hex::encode(hasher.finalize());
-            if digest != entry.sha256 {
-                let _ = tokio::fs::remove_file(&temporary).await;
-                return Err(format!("{}: неверная SHA-256", entry.path));
-            }
-            if destination.exists() {
-                tokio::fs::remove_file(&destination)
-                    .await
-                    .map_err(|error| format!("{}: {error}", entry.path))?;
-            }
-            tokio::fs::rename(&temporary, &destination)
-                .await
-                .map_err(|error| format!("{}: {error}", entry.path))?;
-            let done = current.fetch_add(1, Ordering::Relaxed) + 1;
-            let all = downloaded.load(Ordering::Relaxed);
-            emit(
-                &app,
-                &event_name,
-                UpdateEvent {
-                    kind: "progress".into(),
-                    file: entry.path.clone(),
-                    current: done,
-                    total,
-                    downloaded: all,
-                    total_bytes,
-                    percent: if total_bytes > 0 {
-                        (all as f64 / total_bytes as f64 * 100.0).min(99.9)
-                    } else {
-                        0.0
-                    },
-                    message: String::new(),
-                },
-            );
-            Ok::<(), String>(())
+            Err(last_error.unwrap_or_else(|| format!("{}: нет источника загрузки", entry.path)))
         }
     });
 
     let results: Vec<Result<(), String>> = stream::iter(tasks).buffer_unordered(concurrency).collect().await;
+    let direct = cdn_ok.load(Ordering::Relaxed);
+    let fallback = cdn_fallbacks.load(Ordering::Relaxed);
+    if direct + fallback > 0 {
+        emit(
+            &app,
+            event,
+            UpdateEvent {
+                kind: "log".into(),
+                file: String::new(),
+                current: direct,
+                total: direct + fallback,
+                downloaded: 0,
+                total_bytes: 0,
+                percent: 0.0,
+                message: format!(
+                    "CDN Blizzard: файлов с CDN — {direct}, с резервного сервера — {fallback}"
+                ),
+            },
+        );
+    }
     if let Some(error) = results.into_iter().find_map(|result| result.err()) {
         emit(
             &app,
@@ -931,5 +1116,60 @@ mod tests {
         file.verify_sha256 = true;
         assert!(!file_is_current(&path, &file, false));
         std::fs::remove_file(path).unwrap();
+    }
+
+    fn build_manifest() -> BuildManifest {
+        BuildManifest {
+            build: "1.60.1.70888".into(),
+            build_id: 70888,
+            product: "wowf".into(),
+            cdn: Some(CdnInfo {
+                product: "wowf".into(),
+                build_config: "0597e74b01a3f779d849ffe9b3270196".into(),
+                cdn_config: "8ecf609471cb2ea16667be9cc2b7a555".into(),
+                cdn_path: "tpr/wow".into(),
+                cdn_hosts: vec!["level3.blizzard.com".into(), "us.cdn.blizzard.com".into()],
+            }),
+            overlay: vec!["_forever_/wow_loader.dll".into()],
+            fallback_manifest: "manifest.json".into(),
+        }
+    }
+
+    #[test]
+    fn cdn_is_used_only_for_content_addressed_metadata() {
+        let build = build_manifest();
+        let index = "Data/indices/0017a402f556fbece46c38dc431a2c9b.index";
+        let urls = cdn_urls_for(index, Some(&build));
+        assert_eq!(urls.len(), 2);
+        assert_eq!(urls[0], "https://level3.blizzard.com/tpr/wow/data/00/17/0017a402f556fbece46c38dc431a2c9b.index");
+
+        let config = "Data/config/05/97/0597e74b01a3f779d849ffe9b3270196";
+        assert_eq!(
+            cdn_urls_for(config, Some(&build))[1],
+            "https://us.cdn.blizzard.com/tpr/wow/config/05/97/0597e74b01a3f779d849ffe9b3270196"
+        );
+        // Bulk CASC archives are not flat CDN objects and must stay on our server.
+        assert!(cdn_urls_for("Data/data/data.000", Some(&build)).is_empty());
+        assert!(cdn_urls_for("Data/config/encoding.info", Some(&build)).is_empty());
+        assert!(cdn_urls_for("_forever_/wow_loader.dll", Some(&build)).is_empty());
+        assert!(cdn_urls_for("_forever_/Wow.exe", Some(&build)).is_empty());
+    }
+
+    #[test]
+    fn overlay_list_can_force_a_file_to_our_server() {
+        let mut build = build_manifest();
+        build.overlay.push("Data/config/05/97/0597e74b01a3f779d849ffe9b3270196".into());
+        assert!(cdn_urls_for("Data/config/05/97/0597e74b01a3f779d849ffe9b3270196", Some(&build)).is_empty());
+    }
+
+    #[test]
+    fn required_build_comes_from_the_small_manifest() {
+        let mut manifest: ClientManifest = serde_json::from_str(r#"{"version":"v","build":"","files":[]}"#).unwrap();
+        let build = build_manifest();
+        assert_eq!(required_build(Some(&build), &manifest), "1.60.1.70888");
+        assert_eq!(required_build(None, &manifest), "");
+        manifest.build = "1.60.1.70000".into();
+        assert_eq!(required_build(None, &manifest), "1.60.1.70000");
+        assert_eq!(required_build(Some(&build), &manifest), "1.60.1.70888");
     }
 }
