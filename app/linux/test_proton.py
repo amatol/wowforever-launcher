@@ -33,7 +33,7 @@ env = dict(os.environ, STEAM_COMPAT_DATA_PATH=str(ROOT / "prefix"),
            STEAM_COMPAT_CLIENT_INSTALL_PATH=str(ROOT / "steam"), WINEDEBUG="-all")
 (ROOT / "prefix").mkdir()
 (ROOT / "steam").mkdir()
-modes = os.environ.get("FOREVER_TEST_MODES", "valid,delayed,late-keys,late-duplicate,overflow,restore,unknown,duplicate,readonly,respawn,unrelated").split(",")
+modes = os.environ.get("FOREVER_TEST_MODES", "valid,module,delayed,late-keys,late-duplicate,overflow,restore,unknown,duplicate,readonly,respawn,unrelated").split(",")
 for mode in modes:
     game_dir = ROOT / (mode + " Игра с пробелами")
     game_dir.mkdir()
@@ -63,7 +63,7 @@ for mode in modes:
     result = (game_dir / "fixture-result.txt").read_text()
     assert "FIXTURE PASS" in result and "FIXTURE FAIL" not in result, (mode, result)
     ready = sum(line.startswith("READY ") for line in text.splitlines())
-    assert ready == (2 if mode == "restore" else 1 if mode in ("valid", "delayed", "late-keys", "respawn", "unrelated") else 0), (mode, text)
+    assert ready == (2 if mode == "restore" else 1 if mode in ("valid", "module", "delayed", "late-keys", "respawn", "unrelated") else 0), (mode, text)
     if mode == "unrelated":
         assert "FIXTURE PASS no speculative write" in result, result
     print(f"PASS {mode}: READY={ready}", flush=True)

@@ -5,6 +5,7 @@
 #define _WIN32_WINNT 0x0601
 #include <windows.h>
 #include <tlhelp32.h>
+#include <psapi.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <wchar.h>
@@ -15,6 +16,8 @@
 #define MAX_CLIENTS 16
 #define MAX_OWNED 256
 #define MAX_CANDIDATES 128
+#define MAX_SCAN_REGIONS 8192
+#define SMALL_HEAP_LIMIT (64u * 1024u * 1024u)
 
 static FILE *log_file;
 static uint8_t keys[KEY_COUNT][32], replacement[32];
@@ -159,9 +162,25 @@ static uintptr_t probe_candidates(Client *client) {
     return 0;
 }
 
-static uintptr_t scan(Client *client, uint8_t *buffer) {
+typedef struct {
+    uintptr_t lo;
+    uintptr_t hi;
+    int priority;
+} ScanRegion;
+
+static int compare_regions(const void *left, const void *right) {
+    const ScanRegion *a = left;
+    const ScanRegion *b = right;
+    if (a->priority != b->priority) return a->priority - b->priority;
+    uintptr_t as = a->hi - a->lo;
+    uintptr_t bs = b->hi - b->lo;
+    return as < bs ? -1 : as > bs ? 1 : 0;
+}
+
+static uintptr_t scan(Client *client, uint8_t *buffer, const wchar_t *game) {
     uintptr_t address = 0;
     size_t matches = 0, shapes = 0, regions = 0, failures = 0;
+    size_t module_regions = 0, heap_regions = 0;
     unsigned long long bytes = 0;
     ULONGLONG began = GetTickCount64();
     ULONGLONG last_probe = began;
@@ -169,6 +188,12 @@ static uintptr_t scan(Client *client, uint8_t *buffer) {
         client->candidate_count = client->confirmed_candidates = 0;
         client->candidate_overflow = 0;
     }
+
+    /* The client's key store is created in its own image (.data/.bss) or in
+     * the process heap. Collect writable regions first, then scan the main
+     * module and small private heaps before huge unrelated mappings. */
+    static ScanRegion list[MAX_SCAN_REGIONS];
+    size_t count = 0;
     MEMORY_BASIC_INFORMATION info;
     while (live(client->handle) && VirtualQueryEx(client->handle, (void *)address, &info, sizeof info)) {
         uintptr_t lo = (uintptr_t)info.BaseAddress;
@@ -177,6 +202,41 @@ static uintptr_t scan(Client *client, uint8_t *buffer) {
         if (hi <= address) break;
         address = hi;
         if (info.State != MEM_COMMIT || !writable(info.Protect)) continue;
+        if (count == MAX_SCAN_REGIONS) break;
+        int priority = 3;
+        if (info.Type == MEM_IMAGE) {
+            wchar_t mapped[32768];
+            DWORD len = GetMappedFileNameW(client->handle, (void *)lo, mapped,
+                                           (DWORD)(sizeof mapped / sizeof mapped[0]));
+            if (len) {
+                wchar_t *name = wcsrchr(mapped, L'\\');
+                name = name ? name + 1 : mapped;
+                wchar_t *slash = wcsrchr(name, L'/');
+                if (slash) name = slash + 1;
+                const wchar_t *wanted = wcsrchr(game, L'\\');
+                wanted = wanted ? wanted + 1 : game;
+                wchar_t *wanted_slash = wcsrchr((wchar_t *)wanted, L'/');
+                if (wanted_slash) wanted = wanted_slash + 1;
+                if (!_wcsicmp(name, wanted)) priority = 0;
+            }
+        } else if (info.Type == MEM_PRIVATE) {
+            priority = info.RegionSize <= SMALL_HEAP_LIMIT ? 1 : 2;
+        }
+        list[count].lo = lo;
+        list[count].hi = hi;
+        list[count].priority = priority;
+        ++count;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        if (list[i].priority == 0) ++module_regions;
+        else if (list[i].priority <= 2) ++heap_regions;
+    }
+    qsort(list, count, sizeof(list[0]), compare_regions);
+    if (count == 0) return 0;
+
+    for (size_t region = 0; region < count && live(client->handle); ++region) {
+        uintptr_t lo = list[region].lo;
+        uintptr_t hi = list[region].hi;
         ++regions;
         for (uintptr_t off = lo; off < hi && live(client->handle);) {
             size_t take = hi - off < CHUNK ? (size_t)(hi - off) : CHUNK;
@@ -219,8 +279,8 @@ static uintptr_t scan(Client *client, uint8_t *buffer) {
             Sleep(1);
         }
     }
-    record("SCAN", "pid=%lu regions=%zu bytes=%llu read_failures=%zu known=%zu shapes=%zu ms=%llu",
-           client->pid, regions, bytes, failures, matches, shapes,
+    record("SCAN", "pid=%lu regions=%zu module=%zu heap=%zu bytes=%llu read_failures=%zu known=%zu shapes=%zu ms=%llu",
+           client->pid, regions, module_regions, heap_regions, bytes, failures, matches, shapes,
            (unsigned long long)(GetTickCount64() - began));
     client->confirmed_candidates = client->candidate_count;
     uintptr_t candidate = probe_candidates(client);
@@ -353,7 +413,7 @@ int wmain(int argc, wchar_t **argv) {
             }
             if (!c->store) c->store = probe_candidates(c);
             if (!c->store && GetTickCount64() >= c->next_scan) {
-                c->store = scan(c, buffer);
+                c->store = scan(c, buffer, game);
                 /* The store can be allocated during startup, shortly before autologin.
                  * Retry promptly at first; after READY only 480 bytes are polled. */
                 c->next_scan = GetTickCount64() + (GetTickCount64() - c->first_seen < 20000 ?

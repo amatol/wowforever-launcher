@@ -20,6 +20,9 @@ static void fill(uint8_t *raw) {
     }
 }
 
+/* Store in the client's own image (.data), not in the heap. */
+static uint8_t module_store[KEY_BLOCK];
+
 int main(void) {
     const char *mode = getenv("FOREVER_FIXTURE_MODE");
     if (!mode) return 10;
@@ -46,6 +49,11 @@ int main(void) {
     /* The complete store straddles a scan chunk, so overlap is required. */
     volatile uint8_t *raw = allocation + 1024 * 1024 - 240;
     fill((uint8_t *)raw);
+    if (!strcmp(mode, "module")) {
+        memset((uint8_t *)raw, 0, KEY_BLOCK);
+        fill(module_store);
+        raw = module_store;
+    }
     int late_keys = !strcmp(mode, "late-keys") || !strcmp(mode, "late-duplicate");
     if (late_keys) {
         for (unsigned e = 0; e < KEY_COUNT; ++e)
@@ -68,7 +76,7 @@ int main(void) {
     if (!strcmp(mode, "readonly")) VirtualProtect(allocation, 2 * 1024 * 1024, PAGE_READONLY, &old);
     uint8_t expected[32];
     decode_key("02596F0D0C061A8B30745988FD72C59E29EC367FB0F341F28E0F08D037BAFC69", expected);
-    int should_patch = !strcmp(mode, "valid") || !strcmp(mode, "restore") || !strcmp(mode, "delayed") || !strcmp(mode, "late-keys");
+    int should_patch = !strcmp(mode, "valid") || !strcmp(mode, "restore") || !strcmp(mode, "delayed") || !strcmp(mode, "late-keys") || !strcmp(mode, "module");
     int seen = 0, restored = 0;
     ULONGLONG start = GetTickCount64();
     ULONGLONG filled_at = 0;

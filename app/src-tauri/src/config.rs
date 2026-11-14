@@ -66,7 +66,7 @@ impl Default for LinuxSettings {
     fn default() -> Self {
         Self {
             runner: String::new(),
-            prefix: home().join("Games/forever-wow").to_string_lossy().into_owned(),
+            prefix: default_prefix().to_string_lossy().into_owned(),
             gamescope: false,
             gamescope_args: "-f".into(),
             keyboard: String::new(),
@@ -119,6 +119,24 @@ pub fn config_dir() -> PathBuf {
     dirs::config_dir().unwrap_or_else(home).join("forever-launcher-app")
 }
 
+/// XDG data folder (hidden on SteamOS): Proton prefix and other large state.
+pub fn data_dir() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| home().join(".local/share"))
+        .join("forever-launcher-app")
+}
+
+/// Wine/Proton prefix. It must persist between launches; only its location changed
+/// from the visible ~/Games/forever-wow to the standard hidden XDG data folder.
+pub fn default_prefix() -> PathBuf {
+    data_dir().join("prefix")
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn legacy_prefix() -> PathBuf {
+    home().join("Games/forever-wow")
+}
+
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
     serde_json::from_slice(&std::fs::read(path).ok()?).ok()
 }
@@ -152,6 +170,13 @@ impl Settings {
         }
         #[cfg(target_os = "linux")]
         {
+            // Move only the setting to the hidden XDG location. The old
+            // ~/Games/forever-wow folder is deliberately left untouched.
+            if s.linux.prefix.trim().is_empty()
+                || Path::new(s.linux.prefix.trim_end_matches('/')) == legacy_prefix()
+            {
+                s.linux.prefix = default_prefix().to_string_lossy().into_owned();
+            }
             // empty, or "wine" saved on a PC that has no wine (SteamOS): pick a Proton from Steam
             if s.linux.runner.is_empty() || (s.linux.runner == "wine" && !crate::system::which("wine")) {
                 s.linux.runner = crate::system::default_runner();
@@ -322,4 +347,22 @@ fn detect_game_dir() -> Option<String> {
         }
     }
     candidates.into_iter().find(|p| game_binary(p).exists()).map(|p| p.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proton_prefix_is_hidden_and_not_in_games() {
+        let prefix = default_prefix();
+        assert!(prefix.ends_with("forever-launcher-app/prefix"));
+        assert!(!prefix.to_string_lossy().contains("/Games/"));
+        assert!(!prefix.to_string_lossy().contains("\\Games\\"));
+    }
+
+    #[test]
+    fn legacy_prefix_is_recognized_only_for_migration() {
+        assert_eq!(legacy_prefix(), home().join("Games/forever-wow"));
+    }
 }

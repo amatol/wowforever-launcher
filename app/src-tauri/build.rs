@@ -45,6 +45,7 @@ fn build_keypatch_linux() {
         .args(["-std=c11", "-municode", "-O2", "-Wall", "-Wextra", "-Werror", "-static", "-o"])
         .arg(&out)
         .arg(src)
+        .arg("-lpsapi")
         .status()
         .expect("MinGW compiler not found (install gcc-mingw-w64-x86-64)");
     assert!(status.success(), "building {src} failed");
