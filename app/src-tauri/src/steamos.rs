@@ -1,4 +1,5 @@
-//! Native launcher / Wine helper boundary. No host memory access or preload hooks.
+//! Native launcher / Wine helper boundary. The key patcher runs inside the game's
+//! Wine session; the only host-side preload is a narrow connect gate for the world port.
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -6,6 +7,7 @@ use std::process::Child;
 use std::time::{Duration, Instant};
 
 const HELPER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/forever-keypatch.exe"));
+const NETDELAY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libforever_netdelay.so"));
 
 pub struct Launch {
     pub child: Child,
@@ -15,6 +17,18 @@ pub struct Launch {
 
 pub fn windows_path(path: &Path) -> Result<String, String> {
     let absolute = std::fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    windows_path_allow_missing(&absolute)
+}
+
+/// Same Z: mapping, but the target may not exist yet (e.g. the helper's ready marker).
+pub fn windows_path_allow_missing(path: &Path) -> Result<String, String> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| e.to_string())?
+            .join(path)
+    };
     let text = absolute.to_str().ok_or("Wine requires a UTF-8 path")?;
     if !text.starts_with('/') || text.contains(['\\', '"', '\n', '\r']) {
         return Err(format!("Unsupported Wine path: {}", absolute.display()));
@@ -23,7 +37,7 @@ pub fn windows_path(path: &Path) -> Result<String, String> {
     Ok(format!("Z:{}", text.replace('/', "\\")))
 }
 
-pub fn prepare() -> Result<(PathBuf, PathBuf, PathBuf), String> {
+pub fn prepare() -> Result<(PathBuf, PathBuf, PathBuf, PathBuf, PathBuf), String> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let dir = crate::config::config_dir().join("runs").join(format!(
         "{}-{:016x}",
@@ -56,7 +70,16 @@ pub fn prepare() -> Result<(PathBuf, PathBuf, PathBuf), String> {
         .mode(0o600)
         .open(&runner_log)
         .map_err(|e| e.to_string())?;
-    Ok((helper, log, runner_log))
+    let netdelay = dir.join("libforever_netdelay.so");
+    OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o700)
+        .open(&netdelay)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, NETDELAY))
+        .map_err(|e| e.to_string())?;
+    let ready = dir.join("ready");
+    Ok((helper, log, runner_log, netdelay, ready))
 }
 
 #[derive(Default)]

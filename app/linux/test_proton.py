@@ -41,8 +41,9 @@ for mode in modes:
     build(HERE / "test_client.c", game)
     log = game_dir / "keypatch.log"
     runner = game_dir / "proton.log"
+    ready = game_dir / "ready"
     mode_env = dict(env, FOREVER_FIXTURE_MODE="valid" if mode == "unrelated" else mode,
-                    STEAM_COMPAT_INSTALL_PATH=str(game_dir))
+                    STEAM_COMPAT_INSTALL_PATH=str(game_dir), FOREVER_READY_WIN=win(ready))
     with runner.open("wb") as output:
         command = [PROTON, "run", win(helper), win(log), win(game), KEY, "8"]
         if mode == "unrelated":
@@ -62,11 +63,12 @@ for mode in modes:
     assert "CLOSED exit=0" in text, (mode, text, output[-4000:])
     result = (game_dir / "fixture-result.txt").read_text()
     assert "FIXTURE PASS" in result and "FIXTURE FAIL" not in result, (mode, result)
-    ready = sum(line.startswith("READY ") for line in text.splitlines())
-    assert ready == (2 if mode == "restore" else 1 if mode in ("valid", "module", "delayed", "late-keys", "respawn", "unrelated") else 0), (mode, text)
+    ready_count = sum(line.startswith("READY ") for line in text.splitlines())
+    assert ready_count == (2 if mode == "restore" else 1 if mode in ("valid", "module", "delayed", "late-keys", "respawn", "unrelated") else 0), (mode, text)
+    assert ready.exists() == (ready_count > 0), (mode, ready_count, ready.exists())
     if mode == "unrelated":
         assert "FIXTURE PASS no speculative write" in result, result
-    print(f"PASS {mode}: READY={ready}", flush=True)
+    print(f"PASS {mode}: READY={ready_count}", flush=True)
     if mode == "late-keys":
         print(result.strip(), flush=True)
 

@@ -26,6 +26,15 @@ static ULONGLONG last_heartbeat;
 static ULONGLONG started_tick;
 static DWORD owned[MAX_OWNED];
 static size_t owned_count;
+static wchar_t ready_path[32768];
+
+static void mark_ready(void) {
+    if (!ready_path[0]) return;
+    FILE *file = _wfopen(ready_path, L"wb");
+    if (!file) return;
+    fputc('1', file);
+    fclose(file);
+}
 
 static int is_owned(DWORD pid) {
     for (size_t i = 0; i < owned_count; ++i) if (owned[i] == pid) return 1;
@@ -361,6 +370,10 @@ int wmain(int argc, wchar_t **argv) {
     log_file = _wfopen(argv[1], L"ab");
     if (!log_file) return 3;
     started_tick = GetTickCount64();
+    const wchar_t *ready = _wgetenv(L"FOREVER_READY_WIN");
+    if (ready && wcslen(ready) < sizeof ready_path / sizeof ready_path[0]) {
+        wcscpy(ready_path, ready);
+    }
     char key[65];
     size_t key_len = wcslen(argv[3]);
     if (key_len != 64) { record("ERROR", "invalid public key"); return 4; }
@@ -445,6 +458,7 @@ int wmain(int argc, wchar_t **argv) {
                     record("READY", "pid=%lu group=%u address=%llx verified=1", c->pid, group,
                            (unsigned long long)c->store);
                     c->ready = 1;
+                    mark_ready();
                 } else if (GetTickCount64() >= c->next_warning) {
                     record("WARN", "pid=%lu key write/verification failed winerr=%lu", c->pid, GetLastError());
                     c->next_warning = GetTickCount64() + 15000;

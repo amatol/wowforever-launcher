@@ -134,7 +134,7 @@ pub fn spawn(settings: &Settings) -> Result<Child, String> {
 pub fn spawn(settings: &Settings) -> Result<crate::steamos::Launch, String> {
     // Validate before starting either the helper or the game.
     crate::patcher::Patcher::new(&settings.server.public_key, settings.server.region_group)?;
-    let (helper, log, runner_log) = crate::steamos::prepare()?;
+    let (helper, log, runner_log, netdelay, ready) = crate::steamos::prepare()?;
     let (runner, mut env) = crate::system::runner(settings)?;
     let mut cmd: Vec<String> = runner;
     cmd.push(crate::steamos::windows_path(&helper)?);
@@ -142,6 +142,17 @@ pub fn spawn(settings: &Settings) -> Result<crate::steamos::Launch, String> {
     cmd.push(crate::steamos::windows_path(&settings.exe())?);
     cmd.push(settings.server.public_key.clone());
     cmd.push(settings.server.region_group.to_string());
+    let mut preload = netdelay.to_string_lossy().into_owned();
+    if let Ok(existing) = std::env::var("LD_PRELOAD") {
+        if !existing.trim().is_empty() {
+            preload = format!("{preload}:{existing}");
+        }
+    }
+    env.push(("LD_PRELOAD".into(), preload));
+    env.push(("FOREVER_READY_FILE".into(), ready.to_string_lossy().into_owned()));
+    env.push(("FOREVER_READY_WIN".into(), crate::steamos::windows_path_allow_missing(&ready)?));
+    env.push(("FOREVER_WORLD_PORT".into(), settings.server.world_port.to_string()));
+    env.push(("FOREVER_NET_TIMEOUT".into(), "15000".into()));
     let l = &settings.linux;
     if l.gamescope && crate::system::which("gamescope") {
         // gamescope starts its own Xwayland with a US keyboard unless told otherwise

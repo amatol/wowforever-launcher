@@ -51,6 +51,22 @@ fn build_keypatch_linux() {
     assert!(status.success(), "building {src} failed");
 }
 
+/// Linux/SteamOS: small host library that delays only the world-server connect
+/// until the helper has written the server key.
+fn build_netdelay_linux() {
+    let src = "../linux/netdelay.c";
+    println!("cargo:rerun-if-changed={src}");
+    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("libforever_netdelay.so");
+    let status = Command::new("cc")
+        .args(["-shared", "-fPIC", "-O2", "-Wall", "-Wextra", "-Werror", "-o"])
+        .arg(&out)
+        .arg(src)
+        .arg("-ldl")
+        .status()
+        .expect("cc not found (install build-essential)");
+    assert!(status.success(), "building {src} failed");
+}
+
 fn main() {
     embed_ca();
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
@@ -58,6 +74,7 @@ fn main() {
     }
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
         build_keypatch_linux();
+        build_netdelay_linux();
     }
     // FOREVER_CHECK_ONLY=1: lets `cargo check --target x86_64-pc-windows-gnu` run on Linux without the Windows
     // resource compiler (real builds never set it)
