@@ -103,6 +103,8 @@ typedef struct {
     ULONGLONG first_seen;
     ULONGLONG next_warning;
     ULONGLONG next_patch;
+    uintptr_t pending_store;
+    ULONGLONG pending_since;
     uintptr_t candidates[MAX_CANDIDATES];
     size_t candidate_count;
     size_t confirmed_candidates;
@@ -150,10 +152,27 @@ static uintptr_t probe_candidates(Client *client) {
             ++matches;
         }
     }
-    if (matches == 1 && eligible) {
-        record("CACHE_HIT", "pid=%lu address=%llx candidates=%zu", client->pid,
-               (unsigned long long)found, client->candidate_count);
-        return found;
+    if (matches == 1) {
+        if (eligible) {
+            record("CACHE_HIT", "pid=%lu address=%llx candidates=%zu", client->pid,
+                   (unsigned long long)found, client->candidate_count);
+            return found;
+        }
+        /* A store discovered in the middle of a sweep is fully verified, but
+         * wait one short settling interval so a duplicate in the next region
+         * can still make the choice ambiguous. */
+        ULONGLONG now = GetTickCount64();
+        if (client->pending_store != found) {
+            client->pending_store = found;
+            client->pending_since = now;
+        } else if (now - client->pending_since >= 100) {
+            record("CANDIDATE_SETTLED", "pid=%lu address=%llx candidates=%zu",
+                   client->pid, (unsigned long long)found, client->candidate_count);
+            return found;
+        }
+    } else {
+        client->pending_store = 0;
+        client->pending_since = 0;
     }
     if (matches > 1 && GetTickCount64() >= client->next_warning) {
         record("WARN", "pid=%lu indexed verified stores=%zu; no write", client->pid, matches);
