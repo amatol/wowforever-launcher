@@ -6,6 +6,7 @@
 #include <windows.h>
 #include <tlhelp32.h>
 #include <psapi.h>
+#include <shellapi.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <wchar.h>
@@ -355,9 +356,15 @@ static void discover(Client clients[MAX_CLIENTS], const wchar_t *game, ULONGLONG
     CloseHandle(snapshot);
 }
 
-int wmain(int argc, wchar_t **argv) {
-    /* argv: helper log game key group; no account, password or login ticket. */
-    if (argc != 5) return 2;
+int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, LPWSTR command_line, int show) {
+    (void)instance;
+    (void)previous;
+    (void)command_line;
+    (void)show;
+    int argc = 0;
+    wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    /* GUI subsystem: no console window. Diagnostics go to the file only. */
+    if (!argv || argc != 5) return 2;
     log_file = _wfopen(argv[1], L"ab");
     if (!log_file) return 3;
     started_tick = GetTickCount64();

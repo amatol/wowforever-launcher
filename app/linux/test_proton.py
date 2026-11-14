@@ -22,13 +22,13 @@ def win(path):
     return "Z:" + str(path.resolve()).replace("/", "\\")
 
 
-def build(source, target, unicode=False):
+def build(source, target, unicode=False, gui=False):
     subprocess.run(["x86_64-w64-mingw32-gcc", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-static",
-                    *( ["-municode"] if unicode else []), str(source), "-o", str(target)], check=True)
+                    *( ["-municode"] if unicode else []), *( ["-mwindows"] if gui else []), str(source), "-o", str(target)], check=True)
 
 
 helper = ROOT / "forever-keypatch.exe"
-build(Path(os.environ.get("HELPER_SOURCE", str(HERE / "keypatch.c"))), helper, unicode=True)
+build(Path(os.environ.get("HELPER_SOURCE", str(HERE / "keypatch.c"))), helper, unicode=True, gui=True)
 env = dict(os.environ, STEAM_COMPAT_DATA_PATH=str(ROOT / "prefix"),
            STEAM_COMPAT_CLIENT_INSTALL_PATH=str(ROOT / "steam"), WINEDEBUG="-all")
 (ROOT / "prefix").mkdir()

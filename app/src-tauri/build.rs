@@ -42,10 +42,11 @@ fn build_keypatch_linux() {
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("forever-keypatch.exe");
     let compiler = std::env::var("FOREVER_MINGW_CC").unwrap_or_else(|_| "x86_64-w64-mingw32-gcc".into());
     let status = Command::new(compiler)
-        .args(["-std=c11", "-municode", "-O2", "-Wall", "-Wextra", "-Werror", "-static", "-o"])
+        .args(["-std=c11", "-municode", "-mwindows", "-O2", "-Wall", "-Wextra", "-Werror", "-static", "-o"])
         .arg(&out)
         .arg(src)
         .arg("-lpsapi")
+        .arg("-lshell32")
         .status()
         .expect("MinGW compiler not found (install gcc-mingw-w64-x86-64)");
     assert!(status.success(), "building {src} failed");
