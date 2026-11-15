@@ -55,6 +55,18 @@ pub struct CdnInfo {
 /// `manifest.json` remains the file list and the fallback source of truth.
 #[derive(Clone, Debug, Deserialize)]
 #[allow(dead_code)]
+pub struct YandexInfo {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub public_url: String,
+    /// Folder of the release inside the public share, e.g. /1.60.1.70938.
+    #[serde(default)]
+    pub path: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct BuildManifest {
     #[serde(default)]
     pub build: String,
@@ -64,6 +76,8 @@ pub struct BuildManifest {
     pub product: String,
     #[serde(default)]
     pub cdn: Option<CdnInfo>,
+    #[serde(default)]
+    pub yandex: Option<YandexInfo>,
     #[serde(default)]
     pub overlay: Vec<String>,
     #[serde(default)]
@@ -127,6 +141,8 @@ struct DownloadEntry {
     url: String,
     /// Blizzard CDN URLs tried before `url`. Overlay files never get one.
     cdn_urls: Vec<String>,
+    /// Stable Yandex public-API URL resolved to a temporary href at download time.
+    yandex_url: Option<String>,
     size: u64,
     sha256: String,
 }
@@ -264,9 +280,33 @@ fn entry_for(file: &ManifestFile, build: Option<&BuildManifest>) -> DownloadEntr
         path: file.path.clone(),
         url: file.http_url.clone(),
         cdn_urls: cdn_urls_for(&file.path, build),
+        yandex_url: yandex_url_for(&file.path, build),
         size: file.size,
         sha256: file.sha256.clone(),
     }
+}
+
+/// Stable public-API URL. The API returns a short-lived `href`; it is resolved
+/// immediately before the actual download, so the manifest stays valid.
+fn yandex_url_for(path: &str, build: Option<&BuildManifest>) -> Option<String> {
+    if is_overlay(path, build) {
+        return None;
+    }
+    let yandex = build?.yandex.as_ref()?;
+    if !yandex.enabled || yandex.public_url.trim().is_empty() || yandex.path.trim().is_empty() {
+        return None;
+    }
+    let root = yandex.path.trim_end_matches('/');
+    let full = if root.is_empty() {
+        format!("/{}", path.trim_start_matches('/'))
+    } else {
+        format!("{root}/{}", path.trim_start_matches('/'))
+    };
+    let mut url = reqwest::Url::parse("https://cloud-api.yandex.net/v1/disk/public/resources/download").ok()?;
+    url.query_pairs_mut()
+        .append_pair("public_key", &yandex.public_url)
+        .append_pair("path", &full);
+    Some(url.into())
 }
 
 fn local_version(root: &Path) -> String {
@@ -755,6 +795,35 @@ fn emit(app: &AppHandle, event: &str, payload: UpdateEvent) {
     let _ = app.emit(event, payload);
 }
 
+/// Yandex Disk public API returns JSON `{ "href": "..." }`. The href is temporary,
+/// so it is resolved for each file immediately before downloading.
+async fn resolve_yandex_url(
+    client: &reqwest::Client,
+    api_url: &str,
+    entry: &DownloadEntry,
+) -> Result<String, String> {
+    let response = client
+        .get(api_url)
+        .header("Accept", "application/json")
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|error| format!("{}: {error}", entry.path))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("{}: Yandex API HTTP {status}", entry.path));
+    }
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|error| format!("{}: Yandex API response: {error}", entry.path))?;
+    body.get("href")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| format!("{}: Yandex API returned no href", entry.path))
+}
+
 async fn download_one(
     client: &reqwest::Client,
     url: &str,
@@ -914,6 +983,7 @@ async fn download_entries(
     let cdn_fallbacks = Arc::new(AtomicUsize::new(0));
     let cdn_failures = Arc::new(AtomicUsize::new(0));
     let cdn_disabled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let yandex_ok = Arc::new(AtomicUsize::new(0));
     let tasks = entries.into_iter().map(|entry| {
         let client = client.clone();
         let root = root.clone();
@@ -925,6 +995,7 @@ async fn download_entries(
         let cdn_fallbacks = Arc::clone(&cdn_fallbacks);
         let cdn_failures = Arc::clone(&cdn_failures);
         let cdn_disabled = Arc::clone(&cdn_disabled);
+        let yandex_ok = Arc::clone(&yandex_ok);
         async move {
             let relative = safe_relative(&entry.path)?;
             let destination = root.join(&relative);
@@ -942,10 +1013,29 @@ async fn download_entries(
 
             let mut last_error = None;
             let cdn_count = if cdn_disabled.load(Ordering::Relaxed) { 0 } else { entry.cdn_urls.len() };
-            for (index, url) in entry.cdn_urls.iter().take(cdn_count).chain(std::iter::once(&entry.url)).enumerate() {
+            let mut attempts: Vec<(String, bool, bool)> = Vec::new();
+            if let Some(url) = entry.yandex_url.as_ref() {
+                attempts.push((url.clone(), true, false));
+            }
+            for url in entry.cdn_urls.iter().take(cdn_count) {
+                attempts.push((url.clone(), false, true));
+            }
+            attempts.push((entry.url.clone(), false, false));
+            for (url, yandex, cdn) in &attempts {
+                let actual = if *yandex {
+                    match resolve_yandex_url(&client, url, &entry).await {
+                        Ok(href) => href,
+                        Err(error) => {
+                            last_error = Some(error);
+                            continue;
+                        }
+                    }
+                } else {
+                    url.clone()
+                };
                 match download_one(
                     &client,
-                    url,
+                    &actual,
                     &entry,
                     &destination,
                     &temporary,
@@ -955,20 +1045,22 @@ async fn download_entries(
                     &current,
                     &downloaded,
                     total_bytes,
-                    index < cdn_count,
+                    *cdn,
                 )
                 .await
                 {
                     Ok(()) => {
-                        if index < cdn_count {
+                        if *yandex {
+                            yandex_ok.fetch_add(1, Ordering::Relaxed);
+                        } else if *cdn {
                             cdn_ok.fetch_add(1, Ordering::Relaxed);
-                        } else if cdn_count > 0 {
+                        } else if attempts.len() > 1 {
                             cdn_fallbacks.fetch_add(1, Ordering::Relaxed);
                         }
                         return Ok::<(), String>(());
                     }
                     Err(error) => {
-                        if index + 1 == cdn_count && cdn_count > 0 {
+                        if *cdn {
                             if cdn_failures.fetch_add(1, Ordering::Relaxed) + 1 >= 20 {
                                 cdn_disabled.store(true, Ordering::Relaxed);
                             }
@@ -984,20 +1076,21 @@ async fn download_entries(
     let results: Vec<Result<(), String>> = stream::iter(tasks).buffer_unordered(concurrency).collect().await;
     let direct = cdn_ok.load(Ordering::Relaxed);
     let fallback = cdn_fallbacks.load(Ordering::Relaxed);
-    if direct + fallback > 0 {
+    let yandex = yandex_ok.load(Ordering::Relaxed);
+    if direct + fallback + yandex > 0 {
         emit(
             &app,
             event,
             UpdateEvent {
                 kind: "log".into(),
                 file: String::new(),
-                current: direct,
-                total: direct + fallback,
+                current: yandex + direct,
+                total: yandex + direct + fallback,
                 downloaded: 0,
                 total_bytes: 0,
                 percent: 0.0,
                 message: format!(
-                    "CDN Blizzard: файлов с CDN — {direct}, с резервного сервера — {fallback}"
+                    "Источники файлов: Yandex Disk — {yandex}, CDN Blizzard — {direct}, резервный сервер — {fallback}"
                 ),
             },
         );
@@ -1130,6 +1223,7 @@ mod tests {
                 cdn_path: "tpr/wow".into(),
                 cdn_hosts: vec!["level3.blizzard.com".into(), "us.cdn.blizzard.com".into()],
             }),
+            yandex: None,
             overlay: vec!["_forever_/wow_loader.dll".into()],
             fallback_manifest: "manifest.json".into(),
         }
@@ -1171,5 +1265,23 @@ mod tests {
         manifest.build = "1.60.1.70000".into();
         assert_eq!(required_build(None, &manifest), "1.60.1.70000");
         assert_eq!(required_build(Some(&build), &manifest), "1.60.1.70888");
+    }
+
+    #[test]
+    fn yandex_url_is_derived_for_client_data_but_not_overlay() {
+        let mut build = build_manifest();
+        build.yandex = Some(YandexInfo {
+            enabled: true,
+            public_url: "https://disk.yandex.ru/d/DxjZXLCwnEimiw".into(),
+            path: "/1.60.1.70938".into(),
+        });
+        let url = yandex_url_for("Data/data/data.000", Some(&build)).expect("yandex url");
+        assert!(url.starts_with("https://cloud-api.yandex.net/v1/disk/public/resources/download?"));
+        assert!(url.contains("DxjZXLCwnEimiw"));
+        assert!(url.contains("1.60.1.70938"));
+        assert!(yandex_url_for("_forever_/wow_loader.dll", Some(&build)).is_none());
+        assert!(yandex_url_for(".build.info", Some(&build)).is_none());
+        build.yandex.as_mut().unwrap().enabled = false;
+        assert!(yandex_url_for("Data/data/data.000", Some(&build)).is_none());
     }
 }
