@@ -260,6 +260,17 @@ async function refreshLauncherUpdate() {
 }
 
 function handleLauncherUpdateEvent(payload) {
+  if (['start', 'retry', 'verify', 'log', 'done', 'error'].includes(payload.kind) && payload.message) {
+    log(payload.message);
+  }
+  if (['retry', 'verify', 'log'].includes(payload.kind)) {
+    $('launcher-update-detail').textContent = payload.message || '';
+    if (autoPlayActive) {
+      autoProgress(payload.percent);
+      autoDetail(payload.message || '');
+    }
+    return;
+  }
   if (payload.kind === 'start') {
     $('launcher-update-detail').textContent = t('launcherUpdateDownloading');
     if (autoPlayActive) {
@@ -270,8 +281,9 @@ function handleLauncherUpdateEvent(payload) {
   }
   if (payload.kind === 'progress') {
     const percent = Math.max(0, Math.min(100, Number(payload.percent) || 0));
-    $('launcher-update-detail').textContent = t('launcherUpdateProgress', { percent: percent.toFixed(0) });
-    if (autoPlayActive) autoProgress(percent);
+    const detail = payload.message || t('launcherUpdateProgress', { percent: percent.toFixed(0) });
+    $('launcher-update-detail').textContent = detail;
+    if (autoPlayActive) { autoProgress(percent); autoDetail(detail); }
     return;
   }
   if (payload.kind === 'done') {
@@ -303,6 +315,7 @@ async function installLauncherUpdate() {
     await invoke('install_launcher_update');
   } catch (e) {
     const message = t('launcherUpdateError', { e });
+    log(message);
     $('launcher-update-detail').textContent = message;
     toast(message);
   } finally {

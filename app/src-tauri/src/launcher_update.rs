@@ -8,19 +8,17 @@
 //! Ключ подписи не нужен: целостность проверяется SHA-256 из HTTPS-манифеста.
 
 use crate::config::Settings;
-#[cfg(any(windows, target_os = "linux"))]
-use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 #[cfg(any(windows, target_os = "linux"))]
-use sha2::{Digest, Sha256};
-#[cfg(any(windows, target_os = "linux"))]
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
-#[cfg(any(windows, target_os = "linux"))]
-use std::time::Instant;
 use tauri::AppHandle;
 #[cfg(any(windows, target_os = "linux"))]
 use tauri::Emitter;
+
+#[cfg(any(windows, target_os = "linux"))]
+#[path = "launcher_download.rs"]
+mod download;
 
 /// Linux updates only the AppImage build; it has its own manifest next to the Windows one.
 const SUPPORTED: bool = cfg!(windows) || cfg!(target_os = "linux");
@@ -145,14 +143,34 @@ fn emit(app: &AppHandle, kind: &str, percent: f64, message: impl Into<String>) {
 
 #[cfg(any(windows, target_os = "linux"))]
 pub async fn install(app: &AppHandle, settings: &Settings) -> Result<(), String> {
-    use tokio::io::AsyncWriteExt;
+    // В один .part не должны одновременно писать два вызова обновления.
+    static UPDATING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if UPDATING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return Err("Обновление лаунчера уже выполняется".into());
+    }
+    struct Unlock;
+    impl Drop for Unlock {
+        fn drop(&mut self) { UPDATING.store(false, std::sync::atomic::Ordering::SeqCst); }
+    }
+    let _unlock = Unlock;
 
-    let manifest = fetch_manifest(settings).await?;
+    let mut retries = 0;
+    let manifest = loop {
+        match fetch_manifest(settings).await {
+            Ok(manifest) => break manifest,
+            Err(error) if retries < download::POLICY.retries => {
+                retries += 1;
+                emit(app, "retry", 0.0, format!("{error} · повтор получения манифеста {}/{} через 5 с", retries, download::POLICY.retries));
+                tokio::time::sleep(download::POLICY.delay).await;
+            }
+            Err(error) => return Err(error),
+        }
+    };
     if !is_newer(&manifest.version, current_version()) {
         emit(app, "done", 100.0, "Лаунчер уже обновлён");
         return Ok(());
     }
-    if manifest.size == 0 || manifest.sha256.len() != 64 {
+    if manifest.size == 0 || manifest.sha256.len() != 64 || !manifest.sha256.bytes().all(|c| c.is_ascii_hexdigit()) {
         return Err("В манифесте лаунчера нет корректного размера или SHA-256".into());
     }
     if !manifest.download_url.starts_with("https://") {
@@ -174,85 +192,24 @@ pub async fn install(app: &AppHandle, settings: &Settings) -> Result<(), String>
         .map_err(|error| format!("Нет прав на запись в папку лаунчера {}: {error}", parent.display()))?;
     let _ = std::fs::remove_file(&probe);
 
-    let temporary = temporary_path(&current);
-    let _ = std::fs::remove_file(&temporary);
+    let temporary = download::partial_path(&current, &manifest.sha256);
 
     let client = reqwest::Client::builder()
         .user_agent("ForeverAI-Launcher")
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(300))
+        .connect_timeout(Duration::from_secs(30))
         .build()
         .map_err(|error| error.to_string())?;
-    let response = client
-        .get(&manifest.download_url)
-        .send()
-        .await
-        .map_err(|error| format!("Не удалось скачать лаунчер: {error}"))?;
-    let http_status = response.status();
-    if !http_status.is_success() {
-        return Err(format!("Сервер вернул HTTP {http_status} для {}", manifest.download_url));
-    }
-
     emit(
         app,
         "start",
         0.0,
         format!("Скачивание лаунчера {}", manifest.version),
     );
-    let mut file = tokio::fs::File::create(&temporary)
-        .await
-        .map_err(|error| format!("Не удалось создать временный файл: {error}"))?;
-    let mut stream = response.bytes_stream();
-    let mut hasher = Sha256::new();
-    let mut downloaded = 0u64;
-    let mut last_emit = Instant::now();
-
-    while let Some(chunk) = stream.next().await {
-        let chunk = match chunk {
-            Ok(chunk) => chunk,
-            Err(error) => {
-                let _ = tokio::fs::remove_file(&temporary).await;
-                return Err(format!("Ошибка загрузки лаунчера: {error}"));
-            }
-        };
-        file.write_all(&chunk)
-            .await
-            .map_err(|error| format!("Не удалось записать лаунчер: {error}"))?;
-        hasher.update(&chunk);
-        downloaded += chunk.len() as u64;
-        if last_emit.elapsed() >= Duration::from_millis(200) {
-            last_emit = Instant::now();
-            let percent = if manifest.size > 0 {
-                (downloaded as f64 / manifest.size as f64 * 100.0).min(99.9)
-            } else {
-                0.0
-            };
-            emit(app, "progress", percent, String::new());
-        }
-    }
-    file.flush()
-        .await
-        .map_err(|error| format!("Не удалось сохранить лаунчер: {error}"))?;
-    drop(file);
-
-    if downloaded != manifest.size {
-        let _ = tokio::fs::remove_file(&temporary).await;
-        return Err(format!(
-            "Лаунчер скачан не полностью: ожидалось {} байт, получено {}",
-            manifest.size, downloaded
-        ));
-    }
-    let digest = hex::encode(hasher.finalize());
-    if !digest.eq_ignore_ascii_case(&manifest.sha256) {
-        let _ = tokio::fs::remove_file(&temporary).await;
-        return Err("SHA-256 скачанного лаунчера не совпала с манифестом".into());
-    }
-
+    download::download(&client, &manifest, &temporary, download::POLICY,
+        |kind, percent, message| emit(app, kind, percent, message)).await?;
+    // Даже при ошибке установки проверенная загрузка остаётся для следующего запуска.
+    spawn_replacer(&current, &temporary)?;
     emit(app, "done", 100.0, "Обновление загружено, лаунчер перезапустится");
-    if let Err(error) = spawn_replacer(&current, &temporary) {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(error);
-    }
     app.exit(0);
     Ok(())
 }
@@ -260,18 +217,6 @@ pub async fn install(app: &AppHandle, settings: &Settings) -> Result<(), String>
 #[cfg(target_os = "macos")]
 pub async fn install(_app: &AppHandle, _settings: &Settings) -> Result<(), String> {
     Err("Автообновление лаунчера доступно в Windows- и Linux-версии".into())
-}
-
-#[cfg(windows)]
-fn temporary_path(_current: &Path) -> PathBuf {
-    std::env::temp_dir().join(format!("forever-ai-launcher-update-{}.exe", std::process::id()))
-}
-
-/// Linux: next to the AppImage, so that the final rename stays on the same file system (atomic).
-#[cfg(target_os = "linux")]
-fn temporary_path(current: &Path) -> PathBuf {
-    let name = current.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    current.with_file_name(format!(".{name}.update-{}", std::process::id()))
 }
 
 /// Linux: the running AppImage is replaced in place (its mount keeps the old inode), then the new one is started.

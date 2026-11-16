@@ -63,6 +63,9 @@ pub struct CdnInfo {
 pub struct YandexInfo {
     #[serde(default)]
     pub enabled: bool,
+    /// Полный перевод клиента включается отдельно после проверки всех объектов.
+    #[serde(default)]
+    pub all_files: bool,
     #[serde(default)]
     pub public_url: String,
     /// Folder of the release inside the public share, e.g. /1.60.1.70938.
@@ -293,7 +296,8 @@ fn entry_for(file: &ManifestFile, build: Option<&BuildManifest>) -> DownloadEntr
     // В режиме Yandex весь клиент берётся только оттуда, включая EXE/DLL.
     // Даже неполная конфигурация не должна незаметно включать VDS/CDN.
     let yandex_enabled = build.and_then(|b| b.yandex.as_ref()).map(|y| y.enabled).unwrap_or(false);
-    let allow_server_fallback = !yandex_enabled;
+    let all_files = build.and_then(|b| b.yandex.as_ref()).map(|y| y.all_files).unwrap_or(false);
+    let allow_server_fallback = !yandex_enabled || (overlay && !all_files);
     let cdn_urls = if overlay || yandex_enabled {
         Vec::new()
     } else {
@@ -314,6 +318,9 @@ fn entry_for(file: &ManifestFile, build: Option<&BuildManifest>) -> DownloadEntr
 /// immediately before the actual download, so the manifest stays valid.
 fn yandex_url_for(path: &str, build: Option<&BuildManifest>) -> Option<String> {
     let yandex = build?.yandex.as_ref()?;
+    if !yandex.all_files && is_overlay(path, build) {
+        return None;
+    }
     if !yandex.enabled || yandex.public_url.trim().is_empty() || yandex.path.trim().is_empty() {
         return None;
     }
@@ -1827,6 +1834,7 @@ mod tests {
         let mut build = build_manifest();
         build.yandex = Some(YandexInfo {
             enabled: true,
+            all_files: true,
             public_url: "https://disk.yandex.ru/d/DxjZXLCwnEimiw".into(),
             path: "/1.60.1.70938".into(),
         });
@@ -1845,6 +1853,7 @@ mod tests {
         let mut build = build_manifest();
         build.yandex = Some(YandexInfo {
             enabled: true,
+            all_files: true,
             public_url: "https://disk.yandex.ru/d/DxjZXLCwnEimiw".into(),
             path: "/1.60.1.70938".into(),
         });
@@ -1867,5 +1876,22 @@ mod tests {
         assert!(entry.yandex_url.is_none());
         assert!(!entry.allow_server_fallback);
         assert!(entry.cdn_urls.is_empty());
+    }
+
+    #[test]
+    fn legacy_yandex_config_keeps_live_overlay_until_explicit_switch() {
+        let build: BuildManifest = serde_json::from_str(r#"{
+            "build":"1.60.1.70938",
+            "yandex":{"enabled":true,"public_url":"https://disk.yandex.ru/d/test","path":"/1.60.1.70938"},
+            "overlay":["Data/data/0000000008.idx"]
+        }"#).unwrap();
+        for path in ["_forever_/Wow.exe", ".build.info", "Data/data/0000000008.idx"] {
+            let entry = entry_for(&manifest_file(path, 1, ""), Some(&build));
+            assert!(entry.yandex_url.is_none());
+            assert!(entry.allow_server_fallback);
+        }
+        let archive = entry_for(&manifest_file("Data/data/data.000", 1, ""), Some(&build));
+        assert!(archive.yandex_url.is_some());
+        assert!(!archive.allow_server_fallback);
     }
 }
