@@ -82,6 +82,10 @@ pub struct BuildManifest {
     pub yandex: Option<YandexInfo>,
     #[serde(default)]
     pub overlay: Vec<String>,
+    /// Полная переустановка клиента при каждом обновлении: скачать весь набор
+    /// заново, сохранить только WTF и Interface, старую папку удалить.
+    #[serde(default)]
+    pub full_reinstall: bool,
     #[serde(default)]
     pub fallback_manifest: String,
 }
@@ -328,6 +332,28 @@ fn local_version(root: &Path) -> String {
         .unwrap_or_default()
 }
 
+const FULL_REINSTALL_MARKER: &str = ".forever_full_reinstall";
+
+fn full_reinstall_is_done(root: &Path, version: &str) -> bool {
+    std::fs::read_to_string(root.join(FULL_REINSTALL_MARKER))
+        .map(|value| value.trim() == version)
+        .unwrap_or(false)
+}
+
+fn needs_full_reinstall(root: &Path, manifest: &ClientManifest, build: Option<&BuildManifest>) -> bool {
+    let Some(build) = build else { return false };
+    if !build.full_reinstall {
+        return false;
+    }
+    let local = local_version(root);
+    let local_build = crate::config::installed_version(&root.join("_forever_")).unwrap_or_default();
+    let wanted_build = required_build(Some(build), manifest);
+    let build_differs = !wanted_build.is_empty() && local_build != wanted_build;
+    local != manifest.version
+        || build_differs
+        || !full_reinstall_is_done(root, &manifest.version)
+}
+
 fn file_size(path: &Path) -> Option<u64> {
     std::fs::metadata(path).ok().map(|meta| meta.len())
 }
@@ -400,6 +426,12 @@ pub async fn client_status(settings: &Settings) -> Result<ClientStatus, String> 
         changed_files = manifest.files.len();
         changed_bytes = manifest.files.iter().map(|file| file.size).sum();
     }
+    if needs_full_reinstall(&root, &manifest, build_manifest.as_ref()) {
+        // Полная переустановка: показываем реальный объём, даже если
+        // отдельные файлы уже совпали по размеру.
+        changed_files = manifest.files.len();
+        changed_bytes = manifest.files.iter().map(|file| file.size).sum();
+    }
     // Отсутствие .launcher_version у готового клиента не делает его устаревшим:
     // сравниваем реальные размеры файлов и build из .build.info.
     let up_to_date = changed_files == 0;
@@ -433,13 +465,20 @@ async fn update_client_inner(
     let manifest = fetch_client_manifest(settings).await?;
     let build_manifest = fetch_build_manifest(settings).await;
     let root = client_root(settings)?;
-    if needs_data_bundle(&root, &manifest) || (full && !manifest.data_revision.is_empty()) {
-        return replace_client_bundle(app, &root, &manifest, build_manifest.as_ref()).await;
-    }
     let local = local_version(&root);
     let local_build = crate::config::installed_version(&root.join("_forever_")).unwrap_or_default();
     let wanted_build = required_build(build_manifest.as_ref(), &manifest).to_string();
     let build_differs = !wanted_build.is_empty() && local_build != wanted_build;
+    let full_reinstall = build_manifest
+        .as_ref()
+        .map(|build| build.full_reinstall)
+        .unwrap_or(false);
+    if full_reinstall && (full || needs_full_reinstall(&root, &manifest, build_manifest.as_ref())) {
+        return reinstall_client(app, &root, &manifest, build_manifest.as_ref()).await;
+    }
+    if needs_data_bundle(&root, &manifest) || (full && !manifest.data_revision.is_empty()) {
+        return replace_client_bundle(app, &root, &manifest, build_manifest.as_ref()).await;
+    }
     let total_files = manifest.files.len();
     let total_bytes: u64 = manifest.files.iter().map(|file| file.size).sum();
     let mut entries = Vec::new();
@@ -588,6 +627,16 @@ pub async fn install_client(
     let build_manifest = fetch_build_manifest(settings).await;
     std::fs::create_dir_all(root)
         .map_err(|error| format!("Не удалось создать папку {}: {error}", root.display()))?;
+    let full_reinstall = build_manifest
+        .as_ref()
+        .map(|build| build.full_reinstall)
+        .unwrap_or(false);
+    if full_reinstall && (local_version(root) != manifest.version
+        || needs_data_bundle(root, &manifest)
+        || !full_reinstall_is_done(root, &manifest.version))
+    {
+        return reinstall_client(app, root, &manifest, build_manifest.as_ref()).await;
+    }
     if needs_data_bundle(root, &manifest) {
         return replace_client_bundle(app, root, &manifest, build_manifest.as_ref()).await;
     }
@@ -607,6 +656,163 @@ pub async fn install_client(
     std::fs::write(root.join(".launcher_version"), format!("{}\n", manifest.version))
         .map_err(|error| format!("Не удалось записать версию клиента: {error}"))?;
     emit(app, "client", done_event(0, 0, 0, 0, "Клиент установлен"));
+    Ok(())
+}
+
+/// Полная переустановка клиента: скачать весь набор заново, сохранить только
+/// пользовательские `WTF` и `Interface`, старую папку удалить после успеха.
+async fn reinstall_client(
+    app: &AppHandle,
+    root: &Path,
+    manifest: &ClientManifest,
+    build_manifest: Option<&BuildManifest>,
+) -> Result<(), String> {
+    if manifest.version.is_empty()
+        || manifest.version.len() > 80
+        || !manifest.version.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_' || c == b'.')
+    {
+        return Err("Некорректная версия клиента для полной переустановки".into());
+    }
+    let name = root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("Некорректная папка клиента: {}", root.display()))?;
+    let parent = root
+        .parent()
+        .ok_or_else(|| format!("У папки клиента нет родительской папки: {}", root.display()))?;
+    let stage = parent.join(format!(".{name}.forever-new-{}", manifest.version));
+    let backup = parent.join(format!(".{name}.forever-old-{}", manifest.version));
+
+    if backup.exists() {
+        if !root.exists() {
+            std::fs::rename(&backup, root)
+                .map_err(|error| format!("Не удалось восстановить старую папку клиента: {error}"))?;
+        } else if root.join("_forever_/Wow.exe").is_file() && root.join("Data").is_dir() {
+            std::fs::remove_dir_all(&backup)
+                .map_err(|error| format!("Не удалось удалить старую копию {}: {error}", backup.display()))?;
+        } else {
+            return Err(format!(
+                "Найдена резервная папка {}. Восстановите из неё клиент или удалите её вручную.",
+                backup.display()
+            ));
+        }
+    }
+
+    // Старые staging-папки внутри клиента больше не нужны: полная установка
+    // идёт в отдельную папку рядом, а не поверх Data.
+    if root.join("Data").is_dir() {
+        if let Ok(entries) = std::fs::read_dir(root) {
+            for entry in entries.flatten() {
+                let entry_name = entry.file_name();
+                let entry_name = entry_name.to_string_lossy();
+                if entry_name.starts_with(".forever-update-") {
+                    let _ = std::fs::remove_dir_all(entry.path());
+                }
+            }
+        }
+    }
+
+    std::fs::create_dir_all(&stage)
+        .map_err(|error| format!("Не удалось создать папку установки {}: {error}", stage.display()))?;
+
+    emit(
+        app,
+        "client",
+        UpdateEvent {
+            kind: "start".into(),
+            file: String::new(),
+            current: 0,
+            total: manifest.files.len(),
+            downloaded: 0,
+            total_bytes: manifest.files.iter().map(|file| file.size).sum(),
+            percent: 0.0,
+            message: "Полная переустановка клиента".into(),
+        },
+    );
+
+    let mut entries = Vec::new();
+    for file in &manifest.files {
+        let relative = safe_relative(&file.path)?;
+        let path = stage.join(&relative);
+        let size = file.size;
+        let sha = file.sha256.clone();
+        let valid = tokio::task::spawn_blocking(move || file_matches(&path, size, &sha, true))
+            .await
+            .map_err(|error| error.to_string())?;
+        if !valid {
+            entries.push(entry_for(file, build_manifest));
+        }
+    }
+    download_entries(app, "client", &stage, entries, DOWNLOAD_CONCURRENCY).await?;
+
+    for file in &manifest.files {
+        let path = stage.join(safe_relative(&file.path)?);
+        if !path.is_file() {
+            return Err(format!("После загрузки отсутствует файл {}", file.path));
+        }
+    }
+    if !stage.join("Data/data").is_dir() || !stage.join("_forever_/Wow.exe").is_file() {
+        return Err("Полный набор клиента не содержит Data/data или _forever_/Wow.exe".into());
+    }
+
+    let had_root = root.exists();
+    if had_root {
+        std::fs::rename(root, &backup)
+            .map_err(|error| format!("Не удалось сохранить старую папку клиента: {error}"))?;
+    }
+    if let Err(error) = std::fs::rename(&stage, root) {
+        if had_root {
+            let _ = std::fs::rename(&backup, root);
+        }
+        return Err(format!("Не удалось установить новую папку клиента: {error}"));
+    }
+
+    // Сохраняем только пользовательские настройки и аддоны.
+    for directory in ["WTF", "Interface"] {
+        let source = backup.join(directory);
+        if !source.exists() {
+            continue;
+        }
+        let destination = root.join(directory);
+        if destination.exists() {
+            let removed = if destination.is_dir() {
+                std::fs::remove_dir_all(&destination)
+            } else {
+                std::fs::remove_file(&destination)
+            };
+            if let Err(error) = removed {
+                let _ = std::fs::rename(root, &stage);
+                if had_root {
+                    let _ = std::fs::rename(&backup, root);
+                }
+                return Err(format!("Не удалось обновить папку {directory}: {error}"));
+            }
+        }
+        if let Err(error) = std::fs::rename(&source, &destination) {
+            let _ = std::fs::rename(root, &stage);
+            if had_root {
+                let _ = std::fs::rename(&backup, root);
+            }
+            return Err(format!("Не удалось перенести папку {directory}: {error}"));
+        }
+    }
+
+    if !manifest.data_revision.is_empty() {
+        std::fs::write(root.join(".forever_data_revision"), format!("{}\n", manifest.data_revision))
+            .map_err(|error| format!("Не удалось записать ревизию клиента: {error}"))?;
+    }
+    std::fs::write(root.join(".launcher_version"), format!("{}\n", manifest.version))
+        .map_err(|error| format!("Не удалось записать версию клиента: {error}"))?;
+    std::fs::write(root.join(FULL_REINSTALL_MARKER), format!("{}\n", manifest.version))
+        .map_err(|error| format!("Не удалось записать маркер полной установки: {error}"))?;
+
+    if had_root {
+        if let Err(error) = std::fs::remove_dir_all(&backup) {
+            eprintln!("не удалось удалить старую папку клиента {}: {error}", backup.display());
+        }
+    }
+    emit(app, "client", done_event(0, 0, 0, 0, "Клиент переустановлен полностью"));
     Ok(())
 }
 
@@ -1166,6 +1372,23 @@ mod tests {
     }
 
     #[test]
+    fn full_reinstall_requires_its_own_marker() {
+        let path = temp_file(b"marker");
+        let root = path.with_extension("client");
+        std::fs::create_dir(&root).unwrap();
+        let manifest: ClientManifest = serde_json::from_str(r#"{"version":"v2","build":"","data_revision":"fixed","files":[]}"#).unwrap();
+        let mut build = build_manifest();
+        build.build.clear();
+        build.full_reinstall = true;
+        std::fs::write(root.join(".launcher_version"), "v2\n").unwrap();
+        assert!(needs_full_reinstall(&root, &manifest, Some(&build)));
+        std::fs::write(root.join(FULL_REINSTALL_MARKER), "v2\n").unwrap();
+        assert!(!needs_full_reinstall(&root, &manifest, Some(&build)));
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn casc_revision_requires_replacement_even_when_game_build_matches() {
         let path = temp_file(b"marker");
         let root = path.with_extension("client");
@@ -1249,6 +1472,7 @@ mod tests {
             }),
             yandex: None,
             overlay: vec!["_forever_/wow_loader.dll".into()],
+            full_reinstall: false,
             fallback_manifest: "manifest.json".into(),
         }
     }
