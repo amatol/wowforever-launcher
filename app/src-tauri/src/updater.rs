@@ -1518,6 +1518,25 @@ mod tests {
     }
 
     #[test]
+    fn user_data_merge_keeps_both_sides() {
+        let path = temp_file(b"merge");
+        let source = path.with_extension("source");
+        let target = path.with_extension("target");
+        std::fs::create_dir_all(source.join("AddOns")).unwrap();
+        std::fs::create_dir_all(target.join("AddOns")).unwrap();
+        std::fs::write(source.join("Config.wtf"), b"new").unwrap();
+        std::fs::write(target.join("Config.wtf"), b"old").unwrap();
+        std::fs::write(source.join("AddOns/a.txt"), b"a").unwrap();
+        std::fs::write(target.join("AddOns/b.txt"), b"b").unwrap();
+        merge_directory(&source, &target).unwrap();
+        assert_eq!(std::fs::read(target.join("Config.wtf")).unwrap(), b"new");
+        assert_eq!(std::fs::read(target.join("AddOns/a.txt")).unwrap(), b"a");
+        assert_eq!(std::fs::read(target.join("AddOns/b.txt")).unwrap(), b"b");
+        std::fs::remove_dir_all(target).unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn full_reinstall_requires_its_own_marker() {
         let path = temp_file(b"marker");
         let root = path.with_extension("client");
