@@ -1586,6 +1586,22 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn user_backup_refuses_symlinks_without_deleting_originals() {
+        let marker = temp_file(b"symlink");
+        let root = marker.with_extension("client");
+        let stage = root.join(".forever-update-test");
+        std::fs::create_dir_all(root.join("_forever_/WTF")).unwrap();
+        std::fs::write(root.join("_forever_/WTF/Config.wtf"), b"my settings").unwrap();
+        std::os::unix::fs::symlink("WTF", root.join("_forever_/Interface")).unwrap();
+        assert!(preserve_user_directories(&root, &stage).is_err());
+        assert_eq!(std::fs::read(root.join("_forever_/WTF/Config.wtf")).unwrap(), b"my settings");
+        assert!(root.join("_forever_/Interface").is_symlink());
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_file(marker).unwrap();
+    }
+
+    #[test]
     fn user_data_merge_keeps_both_sides() {
         let path = temp_file(b"merge");
         let source = path.with_extension("source");
