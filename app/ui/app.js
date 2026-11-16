@@ -332,6 +332,18 @@ function handleUpdateEvent(payload) {
     if (autoPlayActive) autoProgress(percent);
     return;
   }
+  if (payload.kind === 'retry') {
+    const detail = payload.message || t(progressKey, { current: payload.current || 0, total: payload.total || 0, percent: Number(payload.percent || 0).toFixed(1) });
+    $('update-detail').textContent = detail;
+    $('client-notice').textContent = detail;
+    $('client-notice').hidden = false;
+    if (autoPlayActive) autoDetail(detail);
+    return;
+  }
+  if (payload.kind === 'log') {
+    $('update-detail').textContent = payload.message || '';
+    return;
+  }
   if (payload.kind === 'progress') {
     const percent = Math.max(0, Math.min(100, Number(payload.percent) || 0));
     $('update-progress').hidden = false;

@@ -15,6 +15,9 @@ use tauri::{AppHandle, Emitter};
 const DOWNLOAD_CONCURRENCY: usize = 8;
 /// A stalled source must fail and be retried instead of hanging the whole update.
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
+/// Автоматические повторы одного файла: пауза и максимум попыток.
+const RETRY_DELAY: Duration = Duration::from_secs(5);
+const MAX_FILE_RETRIES: u32 = 50;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ManifestFile {
@@ -1238,68 +1241,102 @@ async fn download_entries(
             let temporary = destination.with_file_name(format!(".{file_name}.part"));
 
             let mut last_error = None;
-            let cdn_count = if cdn_disabled.load(Ordering::Relaxed) { 0 } else { entry.cdn_urls.len() };
-            let mut attempts: Vec<(String, bool, bool)> = Vec::new();
-            if let Some(url) = entry.yandex_url.as_ref() {
-                for _ in 0..3 {
+            for attempt in 0..=MAX_FILE_RETRIES {
+                let cdn_count = if cdn_disabled.load(Ordering::Relaxed) { 0 } else { entry.cdn_urls.len() };
+                let mut attempts: Vec<(String, bool, bool)> = Vec::new();
+                if let Some(url) = entry.yandex_url.as_ref() {
                     attempts.push((url.clone(), true, false));
                 }
-            }
-            for url in entry.cdn_urls.iter().take(cdn_count) {
-                attempts.push((url.clone(), false, true));
-            }
-            if entry.allow_server_fallback {
-                attempts.push((entry.url.clone(), false, false));
-            }
-            for (url, yandex, cdn) in &attempts {
-                let actual = if *yandex {
-                    match resolve_yandex_url(&client, url, &entry).await {
-                        Ok(href) => href,
-                        Err(error) => {
-                            last_error = Some(error);
-                            continue;
-                        }
-                    }
-                } else {
-                    url.clone()
-                };
-                match download_one(
-                    &client,
-                    &actual,
-                    &entry,
-                    &destination,
-                    &temporary,
-                    &app,
-                    &event_name,
-                    total,
-                    &current,
-                    &downloaded,
-                    total_bytes,
-                    *cdn,
-                )
-                .await
-                {
-                    Ok(()) => {
-                        if *yandex {
-                            yandex_ok.fetch_add(1, Ordering::Relaxed);
-                        } else if *cdn {
-                            cdn_ok.fetch_add(1, Ordering::Relaxed);
-                        } else if attempts.len() > 1 {
-                            cdn_fallbacks.fetch_add(1, Ordering::Relaxed);
-                        }
-                        return Ok::<(), String>(());
-                    }
-                    Err(error) => {
-                        if *cdn {
-                            if cdn_failures.fetch_add(1, Ordering::Relaxed) + 1 >= 20 {
-                                cdn_disabled.store(true, Ordering::Relaxed);
+                for url in entry.cdn_urls.iter().take(cdn_count) {
+                    attempts.push((url.clone(), false, true));
+                }
+                if entry.allow_server_fallback {
+                    attempts.push((entry.url.clone(), false, false));
+                }
+                for (url, yandex, cdn) in &attempts {
+                    let actual = if *yandex {
+                        match resolve_yandex_url(&client, url, &entry).await {
+                            Ok(href) => href,
+                            Err(error) => {
+                                last_error = Some(error);
+                                continue;
                             }
                         }
-                        last_error = Some(error);
+                    } else {
+                        url.clone()
+                    };
+                    match download_one(
+                        &client,
+                        &actual,
+                        &entry,
+                        &destination,
+                        &temporary,
+                        &app,
+                        &event_name,
+                        total,
+                        &current,
+                        &downloaded,
+                        total_bytes,
+                        *cdn,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            if *yandex {
+                                yandex_ok.fetch_add(1, Ordering::Relaxed);
+                            } else if *cdn {
+                                cdn_ok.fetch_add(1, Ordering::Relaxed);
+                            } else if attempts.len() > 1 {
+                                cdn_fallbacks.fetch_add(1, Ordering::Relaxed);
+                            }
+                            return Ok::<(), String>(());
+                        }
+                        Err(error) => {
+                            if *cdn {
+                                if cdn_failures.fetch_add(1, Ordering::Relaxed) + 1 >= 20 {
+                                    cdn_disabled.store(true, Ordering::Relaxed);
+                                }
+                            }
+                            last_error = Some(error);
+                        }
                     }
                 }
+                if attempt < MAX_FILE_RETRIES {
+                    let message = format!(
+                        "{}: {} · повтор {}/{} через {} с",
+                        entry.path,
+                        last_error.as_deref().unwrap_or("нет источника загрузки"),
+                        attempt + 1,
+                        MAX_FILE_RETRIES,
+                        RETRY_DELAY.as_secs()
+                    );
+                    emit(
+                        &app,
+                        &event_name,
+                        UpdateEvent {
+                            kind: "retry".into(),
+                            file: entry.path.clone(),
+                            current: current.load(Ordering::Relaxed),
+                            total,
+                            downloaded: downloaded.load(Ordering::Relaxed),
+                            total_bytes,
+                            percent: if total_bytes > 0 {
+                                (downloaded.load(Ordering::Relaxed) as f64 / total_bytes as f64 * 100.0).min(99.9)
+                            } else {
+                                0.0
+                            },
+                            message,
+                        },
+                    );
+                    tokio::time::sleep(RETRY_DELAY).await;
+                }
             }
-            Err(last_error.unwrap_or_else(|| format!("{}: нет источника загрузки", entry.path)))
+            Err(format!(
+                "{}: не удалось скачать после {} попыток: {}",
+                entry.path,
+                MAX_FILE_RETRIES + 1,
+                last_error.unwrap_or_else(|| "нет источника загрузки".into())
+            ))
         }
     });
 
