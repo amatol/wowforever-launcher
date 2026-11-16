@@ -685,33 +685,73 @@ async fn reinstall_client(
         .parent()
         .ok_or_else(|| format!("У папки клиента нет родительской папки: {}", root.display()))?;
     let stage = parent.join(format!(".{name}.forever-new-{}", manifest.version));
-    let backup = parent.join(format!(".{name}.forever-old-{}", manifest.version));
+    let old_data = root.join(format!(".forever-old-data-{}", manifest.version));
+    let old_forever = root.join(format!(".forever-old-forever-{}", manifest.version));
 
-    if backup.exists() {
-        if !root.exists() {
-            std::fs::rename(&backup, root)
-                .map_err(|error| format!("Не удалось восстановить старую папку клиента: {error}"))?;
-        } else if root.join("_forever_/Wow.exe").is_file() && root.join("Data").is_dir() {
-            std::fs::remove_dir_all(&backup)
-                .map_err(|error| format!("Не удалось удалить старую копию {}: {error}", backup.display()))?;
-        } else {
-            return Err(format!(
-                "Найдена резервная папка {}. Восстановите из неё клиент или удалите её вручную.",
-                backup.display()
-            ));
+    // Если прошлая версия лаунчера успела перенести WTF/Interface в staging,
+    // возвращаем их в клиент до начала новой установки.
+    if stage.exists() {
+        for directory in ["WTF", "Interface"] {
+            let source = stage.join(directory);
+            if !source.exists() {
+                continue;
+            }
+            let destination = root.join(directory);
+            if destination.exists() {
+                merge_directory(&source, &destination)?;
+            } else {
+                std::fs::rename(&source, &destination)
+                    .map_err(|error| format!("Не удалось вернуть {}: {error}", directory))?;
+            }
+            emit(
+                app,
+                "client",
+                UpdateEvent {
+                    kind: "log".into(),
+                    file: String::new(),
+                    current: 0,
+                    total: 0,
+                    downloaded: 0,
+                    total_bytes: 0,
+                    percent: 0.0,
+                    message: format!("Восстановлена пользовательская папка {directory} из staging"),
+                },
+            );
         }
     }
 
-    // Старые staging-папки внутри клиента больше не нужны: полная установка
-    // идёт в отдельную папку рядом, а не поверх Data.
-    if root.join("Data").is_dir() {
-        if let Ok(entries) = std::fs::read_dir(root) {
-            for entry in entries.flatten() {
-                let entry_name = entry.file_name();
-                let entry_name = entry_name.to_string_lossy();
-                if entry_name.starts_with(".forever-update-") {
-                    let _ = std::fs::remove_dir_all(entry.path());
-                }
+    // Восстанавливаем незавершённую замену Data/_forever_ или убираем
+    // остатки уже успешной замены.
+    if old_data.exists() {
+        if root.join("Data").exists() {
+            std::fs::remove_dir_all(&old_data)
+                .map_err(|error| format!("Не удалось удалить старую Data: {error}"))?;
+        } else {
+            std::fs::rename(&old_data, root.join("Data"))
+                .map_err(|error| format!("Не удалось восстановить старую Data: {error}"))?;
+        }
+    }
+    if old_forever.exists() {
+        if root.join("_forever_/Wow.exe").is_file() {
+            std::fs::remove_dir_all(&old_forever)
+                .map_err(|error| format!("Не удалось удалить старую _forever_: {error}"))?;
+        } else {
+            if root.join("_forever_").exists() {
+                std::fs::remove_dir_all(root.join("_forever_"))
+                    .map_err(|error| format!("Не удалось удалить неполную _forever_: {error}"))?;
+            }
+            std::fs::rename(&old_forever, root.join("_forever_"))
+                .map_err(|error| format!("Не удалось восстановить старую _forever_: {error}"))?;
+        }
+    }
+
+    // Старые staging-папки внутри клиента больше не нужны.
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let entry_name = entry.file_name();
+            let entry_name = entry_name.to_string_lossy();
+            if entry_name.starts_with(".forever-update-") {
+                let _ = std::fs::remove_dir_all(entry.path());
             }
         }
     }
@@ -759,46 +799,70 @@ async fn reinstall_client(
         return Err("Полный набор клиента не содержит Data/data или _forever_/Wow.exe".into());
     }
 
-    let had_root = root.exists();
-    if had_root {
-        std::fs::rename(root, &backup)
-            .map_err(|error| format!("Не удалось сохранить старую папку клиента: {error}"))?;
+    // Меняем только игровые каталоги. Саму папку клиента не переименовываем:
+    // в ней может лежать запущенный лаунчер, Explorer или антивирус.
+    emit(
+        app,
+        "client",
+        UpdateEvent {
+            kind: "log".into(),
+            file: String::new(),
+            current: manifest.files.len(),
+            total: manifest.files.len(),
+            downloaded: 0,
+            total_bytes: 0,
+            percent: 99.0,
+            message: "Загрузка завершена, заменяем Data и _forever_…".into(),
+        },
+    );
+
+    let had_data = root.join("Data").exists();
+    if had_data {
+        std::fs::rename(root.join("Data"), &old_data)
+            .map_err(|error| format!("Не удалось переместить старую Data: {error}"))?;
     }
-    if let Err(error) = std::fs::rename(&stage, root) {
-        if had_root {
-            let _ = std::fs::rename(&backup, root);
+    let had_forever = root.join("_forever_").exists();
+    if had_forever {
+        if let Err(error) = std::fs::rename(root.join("_forever_"), &old_forever) {
+            if had_data {
+                let _ = std::fs::rename(&old_data, root.join("Data"));
+            }
+            return Err(format!("Не удалось переместить старую _forever_: {error}"));
         }
-        return Err(format!("Не удалось установить новую папку клиента: {error}"));
+    }
+    if let Err(error) = std::fs::rename(stage.join("Data"), root.join("Data")) {
+        if had_forever {
+            let _ = std::fs::rename(&old_forever, root.join("_forever_"));
+        }
+        if had_data {
+            let _ = std::fs::rename(&old_data, root.join("Data"));
+        }
+        return Err(format!("Не удалось установить новую Data: {error}"));
+    }
+    if let Err(error) = std::fs::rename(stage.join("_forever_"), root.join("_forever_")) {
+        let _ = std::fs::rename(root.join("Data"), stage.join("Data"));
+        if had_forever {
+            let _ = std::fs::rename(&old_forever, root.join("_forever_"));
+        }
+        if had_data {
+            let _ = std::fs::rename(&old_data, root.join("Data"));
+        }
+        return Err(format!("Не удалось установить новую _forever_: {error}"));
     }
 
-    // Сохраняем только пользовательские настройки и аддоны.
-    for directory in ["WTF", "Interface"] {
-        let source = backup.join(directory);
-        if !source.exists() {
+    // Остальные файлы манифеста (например, .build.info) копируем поверх.
+    for file in &manifest.files {
+        if file.path.starts_with("Data/") || file.path.starts_with("_forever_/") {
             continue;
         }
-        let destination = root.join(directory);
-        if destination.exists() {
-            let removed = if destination.is_dir() {
-                std::fs::remove_dir_all(&destination)
-            } else {
-                std::fs::remove_file(&destination)
-            };
-            if let Err(error) = removed {
-                let _ = std::fs::rename(root, &stage);
-                if had_root {
-                    let _ = std::fs::rename(&backup, root);
-                }
-                return Err(format!("Не удалось обновить папку {directory}: {error}"));
-            }
+        let relative = safe_relative(&file.path)?;
+        let source = stage.join(&relative);
+        let destination = root.join(&relative);
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
-        if let Err(error) = std::fs::rename(&source, &destination) {
-            let _ = std::fs::rename(root, &stage);
-            if had_root {
-                let _ = std::fs::rename(&backup, root);
-            }
-            return Err(format!("Не удалось перенести папку {directory}: {error}"));
-        }
+        std::fs::copy(&source, &destination)
+            .map_err(|error| format!("Не удалось установить {}: {error}", file.path))?;
     }
 
     if !manifest.data_revision.is_empty() {
@@ -810,12 +874,57 @@ async fn reinstall_client(
     std::fs::write(root.join(FULL_REINSTALL_MARKER), format!("{}\n", manifest.version))
         .map_err(|error| format!("Не удалось записать маркер полной установки: {error}"))?;
 
-    if had_root {
-        if let Err(error) = std::fs::remove_dir_all(&backup) {
-            eprintln!("не удалось удалить старую папку клиента {}: {error}", backup.display());
+    if old_data.exists() {
+        if let Err(error) = std::fs::remove_dir_all(&old_data) {
+            eprintln!("не удалось удалить старую Data {}: {error}", old_data.display());
         }
     }
+    if old_forever.exists() {
+        if let Err(error) = std::fs::remove_dir_all(&old_forever) {
+            eprintln!("не удалось удалить старую _forever_ {}: {error}", old_forever.display());
+        }
+    }
+    // Старые служебные каталоги клиента; WTF и Interface не трогаем.
+    for directory in ["Cache", "Errors", "Logs"] {
+        let path = root.join(directory);
+        if path.is_dir() {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+    let _ = std::fs::remove_dir_all(&stage);
     emit(app, "client", done_event(0, 0, 0, 0, "Клиент переустановлен полностью"));
+    Ok(())
+}
+
+/// Переносит содержимое каталога в целевой, не теряя уже существующие файлы.
+/// Нужен для восстановления WTF/Interface из staging после неудачной замены.
+fn merge_directory(source: &Path, destination: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(destination)
+        .map_err(|error| format!("Не удалось создать {}: {error}", destination.display()))?;
+    let entries = std::fs::read_dir(source)
+        .map_err(|error| format!("Не удалось прочитать {}: {error}", source.display()))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let target = destination.join(entry.file_name());
+        let file_type = entry.file_type().map_err(|error| error.to_string())?;
+        if file_type.is_dir() {
+            if target.exists() && !target.is_dir() {
+                std::fs::remove_file(&target).map_err(|error| error.to_string())?;
+            }
+            merge_directory(&path, &target)?;
+        } else {
+            if target.exists() {
+                if target.is_dir() {
+                    std::fs::remove_dir_all(&target).map_err(|error| error.to_string())?;
+                } else {
+                    std::fs::remove_file(&target).map_err(|error| error.to_string())?;
+                }
+            }
+            std::fs::rename(&path, &target)
+                .map_err(|error| format!("Не удалось перенести {}: {error}", path.display()))?;
+        }
+    }
+    let _ = std::fs::remove_dir(source);
     Ok(())
 }
 

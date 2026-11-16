@@ -18,6 +18,14 @@ let autoUpdateTried = false;
 let autoPlayActive = false;
 let autoPlayStarted = false;
 let autoPlayLaunched = false;
+let lastClientLogPercent = -1;
+
+try {
+  const savedLog = localStorage.getItem('foreverLauncherLog');
+  if (savedLog) $('log').textContent = savedLog;
+} catch (e) {
+  console.debug('log restore:', e);
+}
 
 function toast(text) {
   const t = $('toast');
@@ -31,6 +39,12 @@ function log(line) {
   const pre = $('log');
   const time = new Date().toLocaleTimeString(lang);
   pre.textContent += `[${time}] ${line}\n`;
+  // Журнал переживает перезапуск лаунчера, чтобы быстрые ошибки не терялись.
+  try {
+    localStorage.setItem('foreverLauncherLog', pre.textContent.slice(-200000));
+  } catch (e) {
+    console.debug('log save:', e);
+  }
   pre.scrollTop = pre.scrollHeight;
 }
 
@@ -313,6 +327,8 @@ function handleUpdateEvent(payload) {
   const startKey = 'clientStarting';
   const doneKey = 'clientDone';
   if (payload.kind === 'start') {
+    lastClientLogPercent = -1;
+    log(t(startKey));
     $('update-progress').hidden = false;
     $('update-bar').style.width = '0%';
     $('update-detail').textContent = t(startKey);
@@ -334,6 +350,7 @@ function handleUpdateEvent(payload) {
   }
   if (payload.kind === 'retry') {
     const detail = payload.message || t(progressKey, { current: payload.current || 0, total: payload.total || 0, percent: Number(payload.percent || 0).toFixed(1) });
+    log(detail);
     $('update-detail').textContent = detail;
     $('client-notice').textContent = detail;
     $('client-notice').hidden = false;
@@ -342,6 +359,7 @@ function handleUpdateEvent(payload) {
   }
   if (payload.kind === 'log') {
     $('update-detail').textContent = payload.message || '';
+    if (payload.message) log(payload.message);
     return;
   }
   if (payload.kind === 'progress') {
@@ -350,6 +368,10 @@ function handleUpdateEvent(payload) {
     $('update-bar').style.width = `${percent}%`;
     const file = payload.file ? ` · ${String(payload.file).split('/').pop()}` : '';
     const detail = t(progressKey, { current: payload.current, total: payload.total, percent: percent.toFixed(1) }) + file;
+    if (percent >= lastClientLogPercent + 5) {
+      lastClientLogPercent = percent;
+      log(detail);
+    }
     $('update-detail').textContent = detail;
     $('client-notice').textContent = detail;
     $('client-notice').hidden = false;
@@ -357,6 +379,7 @@ function handleUpdateEvent(payload) {
     return;
   }
   if (payload.kind === 'done') {
+    log(t(doneKey));
     $('update-bar').style.width = '100%';
     $('update-detail').textContent = t(doneKey);
     $('client-notice').textContent = t(doneKey);
@@ -373,6 +396,7 @@ function handleUpdateEvent(payload) {
   }
   if (payload.kind === 'error') {
     const message = t('updateError', { e: payload.message });
+    log(message);
     $('update-detail').textContent = message;
     $('client-notice').textContent = message;
     $('client-notice').hidden = false;
