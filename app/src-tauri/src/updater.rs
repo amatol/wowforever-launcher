@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 const DOWNLOAD_CONCURRENCY: usize = 8;
+/// A stalled source must fail and be retried instead of hanging the whole update.
+const READ_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ManifestFile {
@@ -869,8 +871,14 @@ async fn download_one(
         use tokio::io::AsyncWriteExt;
         let mut hasher = Sha256::new();
         let mut last_emit = Instant::now();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|error| format!("{}: {error}", entry.path))?;
+        loop {
+            let next = tokio::time::timeout(READ_TIMEOUT, stream.next())
+                .await
+                .map_err(|_| format!("{}: таймаут чтения от источника", entry.path))?;
+            let chunk = match next {
+                Some(chunk) => chunk.map_err(|error| format!("{}: {error}", entry.path))?,
+                None => break,
+            };
             file.write_all(&chunk)
                 .await
                 .map_err(|error| format!("{}: {error}", entry.path))?;
@@ -984,6 +992,7 @@ async fn download_entries(
 
     let client = reqwest::Client::builder()
         .user_agent("ForeverAI-Launcher")
+        .connect_timeout(Duration::from_secs(30))
         .build()
         .map_err(|error| error.to_string())?;
     let root = root.to_path_buf();
