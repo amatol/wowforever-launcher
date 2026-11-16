@@ -328,13 +328,14 @@ function handleUpdateEvent(payload) {
   const doneKey = 'clientDone';
   if (payload.kind === 'start') {
     lastClientLogPercent = -1;
-    log(t(startKey));
+    const startDetail = payload.message || t(startKey);
+    log(startDetail);
     $('update-progress').hidden = false;
     $('update-bar').style.width = '0%';
     $('update-detail').textContent = t(startKey);
     $('client-notice').textContent = t(startKey);
     $('client-notice').hidden = false;
-    if (autoPlayActive) autoDetail(t(startKey));
+    if (autoPlayActive) autoDetail(startDetail);
     return;
   }
   if (payload.kind === 'verify') {
@@ -345,7 +346,7 @@ function handleUpdateEvent(payload) {
     $('update-detail').textContent = detail;
     $('client-notice').textContent = detail;
     $('client-notice').hidden = false;
-    if (autoPlayActive) autoProgress(percent);
+    if (autoPlayActive) { autoProgress(percent); autoDetail(detail); }
     return;
   }
   if (payload.kind === 'retry') {
@@ -360,6 +361,7 @@ function handleUpdateEvent(payload) {
   if (payload.kind === 'log') {
     $('update-detail').textContent = payload.message || '';
     if (payload.message) log(payload.message);
+    if (autoPlayActive) autoDetail(payload.message || '');
     return;
   }
   if (payload.kind === 'progress') {
@@ -367,7 +369,8 @@ function handleUpdateEvent(payload) {
     $('update-progress').hidden = false;
     $('update-bar').style.width = `${percent}%`;
     const file = payload.file ? ` · ${String(payload.file).split('/').pop()}` : '';
-    const detail = t(progressKey, { current: payload.current, total: payload.total, percent: percent.toFixed(1) }) + file;
+    const detail = t(progressKey, { current: payload.current, total: payload.total, percent: percent.toFixed(1) })
+      + (payload.message ? ` · ${payload.message}` : file);
     if (percent >= lastClientLogPercent + 5) {
       lastClientLogPercent = percent;
       log(detail);
@@ -375,7 +378,7 @@ function handleUpdateEvent(payload) {
     $('update-detail').textContent = detail;
     $('client-notice').textContent = detail;
     $('client-notice').hidden = false;
-    if (autoPlayActive) autoProgress(percent);
+    if (autoPlayActive) { autoProgress(percent); autoDetail(detail); }
     return;
   }
   if (payload.kind === 'done') {

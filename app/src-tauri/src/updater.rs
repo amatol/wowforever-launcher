@@ -725,28 +725,17 @@ async fn reinstall_client(
     }
     if old_forever.exists() {
         if root.join("_forever_/Wow.exe").is_file() {
-            std::fs::remove_dir_all(&old_forever)
-                .map_err(|error| format!("Не удалось удалить старую _forever_: {error}"))?;
+            return Err(format!("Сохранена предыдущая папка {}. Проверьте в ней WTF и Interface перед повторной установкой; автоматически она не удаляется.", old_forever.display()));
         } else {
             if root.join("_forever_").exists() {
-                std::fs::remove_dir_all(root.join("_forever_"))
-                    .map_err(|error| format!("Не удалось удалить неполную _forever_: {error}"))?;
+                return Err(format!("Найдены две папки _forever_: текущая и {}. Сохраните WTF/Interface из обеих перед восстановлением; автоматически они не удаляются.", old_forever.display()));
             }
             std::fs::rename(&old_forever, root.join("_forever_"))
                 .map_err(|error| format!("Не удалось восстановить старую _forever_: {error}"))?;
         }
     }
 
-    // Старые staging-папки внутри клиента больше не нужны.
-    if let Ok(entries) = std::fs::read_dir(root) {
-        for entry in entries.flatten() {
-            let entry_name = entry.file_name();
-            let entry_name = entry_name.to_string_lossy();
-            if entry_name.starts_with(".forever-update-") && entry.path() != stage {
-                let _ = std::fs::remove_dir_all(entry.path());
-            }
-        }
-    }
+    // Чужие и старые staging-папки не удаляем: там могут остаться данные игрока.
 
     std::fs::create_dir_all(&stage)
         .map_err(|error| format!("Не удалось создать папку установки {}: {error}", stage.display()))?;
@@ -767,7 +756,8 @@ async fn reinstall_client(
     );
 
     let mut entries = Vec::new();
-    for file in &manifest.files {
+    client_phase(app, "Проверяем ранее скачанные файлы…");
+    for (index, file) in manifest.files.iter().enumerate() {
         let relative = safe_relative(&file.path)?;
         let path = stage.join(&relative);
         let size = file.size;
@@ -778,9 +768,13 @@ async fn reinstall_client(
         if !valid {
             entries.push(entry_for(file, build_manifest));
         }
+        if index % 25 == 0 || index + 1 == manifest.files.len() {
+            client_phase(app, &format!("Проверка загрузки: {}/{} · {}", index + 1, manifest.files.len(), file.path));
+        }
     }
     download_entries(app, "client", &stage, entries, DOWNLOAD_CONCURRENCY).await?;
 
+    client_phase(app, "Загрузка завершена. Проверяем комплектность клиента…");
     for file in &manifest.files {
         let path = stage.join(safe_relative(&file.path)?);
         if !path.is_file() {
@@ -790,6 +784,9 @@ async fn reinstall_client(
     if !stage.join("Data/data").is_dir() || !stage.join("_forever_/Wow.exe").is_file() {
         return Err("Полный набор клиента не содержит Data/data или _forever_/Wow.exe".into());
     }
+
+    client_phase(app, "Сохраняем настройки и аддоны из _forever_/WTF и _forever_/Interface…");
+    preserve_user_directories(root, &stage)?;
 
     // Меняем только игровые каталоги. Саму папку клиента не переименовываем:
     // в ней может лежать запущенный лаунчер, Explorer или антивирус.
@@ -866,6 +863,7 @@ async fn reinstall_client(
     std::fs::write(root.join(FULL_REINSTALL_MARKER), format!("{}\n", manifest.version))
         .map_err(|error| format!("Не удалось записать маркер полной установки: {error}"))?;
 
+    client_phase(app, "Клиент установлен. Удаляем старые игровые файлы; резерв настроек остаётся в .forever-user-backups…");
     if old_data.exists() {
         if let Err(error) = std::fs::remove_dir_all(&old_data) {
             eprintln!("не удалось удалить старую Data {}: {error}", old_data.display());
@@ -918,6 +916,57 @@ fn merge_directory(source: &Path, destination: &Path) -> Result<(), String> {
     }
     let _ = std::fs::remove_dir(source);
     Ok(())
+}
+
+/// Копирование без удаления источника; ссылки не разыменовываем за пределы клиента.
+fn copy_user_directory(source: &Path, destination: &Path) -> Result<(), String> {
+    let meta = std::fs::symlink_metadata(source).map_err(|e| format!("{}: {e}", source.display()))?;
+    if meta.file_type().is_symlink() {
+        return Err(format!("Папка настроек содержит ссылку {}. Исходные данные сохранены; требуется ручная проверка ссылки.", source.display()));
+    }
+    if meta.is_dir() {
+        std::fs::create_dir_all(destination).map_err(|e| e.to_string())?;
+        for entry in std::fs::read_dir(source).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            copy_user_directory(&entry.path(), &destination.join(entry.file_name()))?;
+        }
+    } else {
+        std::fs::copy(source, destination).map_err(|e| format!("{}: {e}", source.display()))?;
+    }
+    Ok(())
+}
+
+fn preserve_user_directories(root: &Path, stage: &Path) -> Result<(), String> {
+    // Уникальный резерв не входит ни в staging, ни в заменяемый _forever_.
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?.as_nanos();
+    let backup = root.join(".forever-user-backups").join(stamp.to_string());
+    for relative in ["WTF", "Interface", "_forever_/WTF", "_forever_/Interface"] {
+        let source = root.join(relative);
+        match std::fs::symlink_metadata(&source) {
+            Ok(_) => {},
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("Не удалось проверить {}: {e}", source.display())),
+        }
+        let saved = backup.join(relative);
+        if let Some(parent) = saved.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        copy_user_directory(&source, &saved)?;
+        if relative.starts_with("_forever_/") {
+            let target = stage.join(relative);
+            // Копируем из сохранённого резерва; ошибка прерывает замену каталогов.
+            copy_user_directory(&saved, &target)?;
+        }
+    }
+    Ok(())
+}
+
+fn client_phase(app: &AppHandle, message: &str) {
+    emit(app, "client", UpdateEvent {
+        kind: "log".into(), file: String::new(), current: 0, total: 0,
+        downloaded: 0, total_bytes: 0, percent: 0.0, message: message.into(),
+    });
 }
 
 fn needs_data_bundle(root: &Path, manifest: &ClientManifest) -> bool {
@@ -1214,7 +1263,9 @@ async fn download_one(
                         } else {
                             0.0
                         },
-                        message: String::new(),
+                        message: format!("{} · {:.1}% файла · {:.1}/{:.1} МиБ", entry.path,
+                            if entry.size == 0 { 100.0 } else { written as f64 / entry.size as f64 * 100.0 },
+                            written as f64 / 1048576.0, entry.size as f64 / 1048576.0),
                     },
                 );
             }
@@ -1258,7 +1309,7 @@ async fn download_one(
                 } else {
                     0.0
                 },
-                message: String::new(),
+                message: format!("{} · 100% файла · SHA-256 проверен", entry.path),
             },
         );
         Ok::<(), String>(())
@@ -1507,6 +1558,31 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, contents).unwrap();
         path
+    }
+
+    #[test]
+    fn reinstall_preserves_nested_user_data_and_backup() {
+        let marker = temp_file(b"preserve");
+        let root = marker.with_extension("client");
+        let stage = root.join(".forever-update-test");
+        for relative in ["WTF", "Interface", "_forever_/WTF", "_forever_/Interface"] {
+            std::fs::create_dir_all(root.join(relative)).unwrap();
+            std::fs::write(root.join(relative).join("custom.txt"), relative).unwrap();
+        }
+        std::fs::create_dir_all(stage.join("_forever_")).unwrap();
+        std::fs::write(stage.join("_forever_/Wow.exe"), b"new game").unwrap();
+        preserve_user_directories(&root, &stage).unwrap();
+        for relative in ["_forever_/WTF", "_forever_/Interface"] {
+            assert_eq!(std::fs::read(stage.join(relative).join("custom.txt")).unwrap(), relative.as_bytes());
+            assert!(root.join(relative).join("custom.txt").exists());
+        }
+        let backup = std::fs::read_dir(root.join(".forever-user-backups")).unwrap().next().unwrap().unwrap().path();
+        for relative in ["WTF", "Interface", "_forever_/WTF", "_forever_/Interface"] {
+            assert_eq!(std::fs::read(backup.join(relative).join("custom.txt")).unwrap(), relative.as_bytes());
+        }
+        assert_eq!(std::fs::read(stage.join("_forever_/Wow.exe")).unwrap(), b"new game");
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_file(marker).unwrap();
     }
 
     #[test]
