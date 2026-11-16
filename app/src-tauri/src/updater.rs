@@ -676,15 +676,7 @@ async fn reinstall_client(
     {
         return Err("Некорректная версия клиента для полной переустановки".into());
     }
-    let name = root
-        .file_name()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| format!("Некорректная папка клиента: {}", root.display()))?;
-    let parent = root
-        .parent()
-        .ok_or_else(|| format!("У папки клиента нет родительской папки: {}", root.display()))?;
-    let stage = parent.join(format!(".{name}.forever-new-{}", manifest.version));
+    let stage = root.join(format!(".forever-update-{}", manifest.version));
     let old_data = root.join(format!(".forever-old-data-{}", manifest.version));
     let old_forever = root.join(format!(".forever-old-forever-{}", manifest.version));
 
@@ -750,7 +742,7 @@ async fn reinstall_client(
         for entry in entries.flatten() {
             let entry_name = entry.file_name();
             let entry_name = entry_name.to_string_lossy();
-            if entry_name.starts_with(".forever-update-") {
+            if entry_name.starts_with(".forever-update-") && entry.path() != stage {
                 let _ = std::fs::remove_dir_all(entry.path());
             }
         }
