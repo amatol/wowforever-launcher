@@ -143,6 +143,8 @@ struct DownloadEntry {
     cdn_urls: Vec<String>,
     /// Stable Yandex public-API URL resolved to a temporary href at download time.
     yandex_url: Option<String>,
+    /// Heavy Yandex files do not fall back to our server by design.
+    allow_server_fallback: bool,
     size: u64,
     sha256: String,
 }
@@ -276,11 +278,20 @@ fn cdn_urls_for(path: &str, build: Option<&BuildManifest>) -> Vec<String> {
 }
 
 fn entry_for(file: &ManifestFile, build: Option<&BuildManifest>) -> DownloadEntry {
+    let yandex_url = yandex_url_for(&file.path, build);
+    let overlay = is_overlay(&file.path, build);
+    let allow_server_fallback = yandex_url.is_none() || overlay;
+    let cdn_urls = if overlay || (yandex_url.is_some() && !allow_server_fallback) {
+        Vec::new()
+    } else {
+        cdn_urls_for(&file.path, build)
+    };
     DownloadEntry {
         path: file.path.clone(),
         url: file.http_url.clone(),
-        cdn_urls: cdn_urls_for(&file.path, build),
-        yandex_url: yandex_url_for(&file.path, build),
+        cdn_urls,
+        yandex_url,
+        allow_server_fallback,
         size: file.size,
         sha256: file.sha256.clone(),
     }
@@ -1015,12 +1026,16 @@ async fn download_entries(
             let cdn_count = if cdn_disabled.load(Ordering::Relaxed) { 0 } else { entry.cdn_urls.len() };
             let mut attempts: Vec<(String, bool, bool)> = Vec::new();
             if let Some(url) = entry.yandex_url.as_ref() {
-                attempts.push((url.clone(), true, false));
+                for _ in 0..3 {
+                    attempts.push((url.clone(), true, false));
+                }
             }
             for url in entry.cdn_urls.iter().take(cdn_count) {
                 attempts.push((url.clone(), false, true));
             }
-            attempts.push((entry.url.clone(), false, false));
+            if entry.allow_server_fallback {
+                attempts.push((entry.url.clone(), false, false));
+            }
             for (url, yandex, cdn) in &attempts {
                 let actual = if *yandex {
                     match resolve_yandex_url(&client, url, &entry).await {
@@ -1283,5 +1298,22 @@ mod tests {
         assert!(yandex_url_for(".build.info", Some(&build)).is_none());
         build.yandex.as_mut().unwrap().enabled = false;
         assert!(yandex_url_for("Data/data/data.000", Some(&build)).is_none());
+    }
+
+    #[test]
+    fn yandex_heavy_files_do_not_fall_back_to_server() {
+        let mut build = build_manifest();
+        build.yandex = Some(YandexInfo {
+            enabled: true,
+            public_url: "https://disk.yandex.ru/d/DxjZXLCwnEimiw".into(),
+            path: "/1.60.1.70938".into(),
+        });
+        let heavy = entry_for(&manifest_file("Data/data/data.000", 1, ""), Some(&build));
+        assert!(heavy.yandex_url.is_some());
+        assert!(!heavy.allow_server_fallback);
+        assert!(heavy.cdn_urls.is_empty());
+        let overlay = entry_for(&manifest_file("_forever_/wow_loader.dll", 1, ""), Some(&build));
+        assert!(overlay.yandex_url.is_none());
+        assert!(overlay.allow_server_fallback);
     }
 }
