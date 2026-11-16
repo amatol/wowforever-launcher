@@ -152,7 +152,7 @@ struct DownloadEntry {
     cdn_urls: Vec<String>,
     /// Stable Yandex public-API URL resolved to a temporary href at download time.
     yandex_url: Option<String>,
-    /// Heavy Yandex files do not fall back to our server by design.
+    /// В режиме Yandex ни один файл клиента не имеет серверного fallback.
     allow_server_fallback: bool,
     size: u64,
     sha256: String,
@@ -242,7 +242,8 @@ fn is_overlay(path: &str, build: Option<&BuildManifest>) -> bool {
 }
 
 /// Only CDN objects with a content hash in the path can be fetched directly.
-/// Client `.data` archives are CASC containers, not flat files, and stay on our server.
+/// Архивы data.* — CASC-контейнеры, а не объекты CDN. В режиме Yandex
+/// этот старый CDN-механизм отключён для всего клиента.
 fn cdn_urls_for(path: &str, build: Option<&BuildManifest>) -> Vec<String> {
     if is_overlay(path, build) {
         return Vec::new();
@@ -289,8 +290,11 @@ fn cdn_urls_for(path: &str, build: Option<&BuildManifest>) -> Vec<String> {
 fn entry_for(file: &ManifestFile, build: Option<&BuildManifest>) -> DownloadEntry {
     let yandex_url = yandex_url_for(&file.path, build);
     let overlay = is_overlay(&file.path, build);
-    let allow_server_fallback = yandex_url.is_none() || overlay;
-    let cdn_urls = if overlay || (yandex_url.is_some() && !allow_server_fallback) {
+    // В режиме Yandex весь клиент берётся только оттуда, включая EXE/DLL.
+    // Даже неполная конфигурация не должна незаметно включать VDS/CDN.
+    let yandex_enabled = build.and_then(|b| b.yandex.as_ref()).map(|y| y.enabled).unwrap_or(false);
+    let allow_server_fallback = !yandex_enabled;
+    let cdn_urls = if overlay || yandex_enabled {
         Vec::new()
     } else {
         cdn_urls_for(&file.path, build)
@@ -309,9 +313,6 @@ fn entry_for(file: &ManifestFile, build: Option<&BuildManifest>) -> DownloadEntr
 /// Stable public-API URL. The API returns a short-lived `href`; it is resolved
 /// immediately before the actual download, so the manifest stays valid.
 fn yandex_url_for(path: &str, build: Option<&BuildManifest>) -> Option<String> {
-    if is_overlay(path, build) {
-        return None;
-    }
     let yandex = build?.yandex.as_ref()?;
     if !yandex.enabled || yandex.public_url.trim().is_empty() || yandex.path.trim().is_empty() {
         return None;
@@ -766,6 +767,18 @@ async fn reinstall_client(
             .await
             .map_err(|error| error.to_string())?;
         if !valid {
+            if is_data_archive(&file.path) {
+                client_phase(app, &format!("Сравниваем локальный архив по SHA-256: {}…", file.path));
+                let source = root.join(&relative);
+                let destination = stage.join(&relative);
+                let file = file.clone();
+                let reused = tokio::task::spawn_blocking(move || reuse_matching_archive(&source, &destination, &file))
+                    .await.map_err(|e| e.to_string())??;
+                if reused {
+                    client_phase(app, &format!("{}: SHA-256 совпадает, повторная загрузка не нужна", relative.display()));
+                    continue;
+                }
+            }
             entries.push(entry_for(file, build_manifest));
         }
         if index % 25 == 0 || index + 1 == manifest.files.len() {
@@ -967,6 +980,33 @@ fn client_phase(app: &AppHandle, message: &str) {
         kind: "log".into(), file: String::new(), current: 0, total: 0,
         downloaded: 0, total_bytes: 0, percent: 0.0, message: message.into(),
     });
+}
+
+fn is_data_archive(path: &str) -> bool {
+    path.strip_prefix("Data/data/data.")
+        .map(|suffix| suffix.len() == 3 && suffix.bytes().all(|b| b.is_ascii_digit()))
+        .unwrap_or(false)
+}
+
+/// Только целые совпавшие архивы. Копия в staging независима от изменяемого
+/// клиентом источника; после копирования SHA-256 проверяется ещё раз.
+fn reuse_matching_archive(source: &Path, destination: &Path, file: &ManifestFile) -> Result<bool, String> {
+    if !is_data_archive(&file.path) || !file_matches(source, file.size, &file.sha256, true) {
+        return Ok(false);
+    }
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let temporary = destination.with_extension("reuse-part");
+    let result = (|| {
+        std::fs::copy(source, &temporary).map_err(|e| format!("Копирование {}: {e}", file.path))?;
+        if !file_matches(&temporary, file.size, &file.sha256, true) { return Ok(false); }
+        if destination.exists() { std::fs::remove_file(destination).map_err(|e| e.to_string())?; }
+        std::fs::rename(&temporary, destination).map_err(|e| e.to_string())?;
+        Ok(true)
+    })();
+    if temporary.exists() { let _ = std::fs::remove_file(temporary); }
+    result
 }
 
 fn needs_data_bundle(root: &Path, manifest: &ClientManifest) -> bool {
@@ -1602,6 +1642,24 @@ mod tests {
     }
 
     #[test]
+    fn archive_reuse_requires_exact_content_not_just_build_or_size() {
+        let source = temp_file(b"same archive");
+        let destination = source.with_extension("reused");
+        let file = manifest_file("Data/data/data.000", 12, &hex::encode(Sha256::digest(b"same archive")));
+        assert!(reuse_matching_archive(&source, &destination, &file).unwrap());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"same archive");
+        std::fs::remove_file(&destination).unwrap();
+        std::fs::write(&source, b"bad! archive").unwrap();
+        assert!(!reuse_matching_archive(&source, &destination, &file).unwrap());
+        assert!(!destination.exists());
+        let index = manifest_file("Data/data/0000000008.idx", 12, &hex::encode(Sha256::digest(b"bad! archive")));
+        assert!(!reuse_matching_archive(&source, &destination, &index).unwrap());
+        assert!(!is_data_archive("Data/data/data.000/other"));
+        assert!(!is_data_archive("Data/data/data.idx"));
+        std::fs::remove_file(&source).unwrap();
+    }
+
+    #[test]
     fn user_data_merge_keeps_both_sides() {
         let path = temp_file(b"merge");
         let source = path.with_extension("source");
@@ -1765,7 +1823,7 @@ mod tests {
     }
 
     #[test]
-    fn yandex_url_is_derived_for_client_data_but_not_overlay() {
+    fn yandex_url_is_derived_for_every_client_file() {
         let mut build = build_manifest();
         build.yandex = Some(YandexInfo {
             enabled: true,
@@ -1776,8 +1834,8 @@ mod tests {
         assert!(url.starts_with("https://cloud-api.yandex.net/v1/disk/public/resources/download?"));
         assert!(url.contains("DxjZXLCwnEimiw"));
         assert!(url.contains("1.60.1.70938"));
-        assert!(yandex_url_for("_forever_/wow_loader.dll", Some(&build)).is_none());
-        assert!(yandex_url_for(".build.info", Some(&build)).is_none());
+        assert!(yandex_url_for("_forever_/wow_loader.dll", Some(&build)).is_some());
+        assert!(yandex_url_for(".build.info", Some(&build)).is_some());
         build.yandex.as_mut().unwrap().enabled = false;
         assert!(yandex_url_for("Data/data/data.000", Some(&build)).is_none());
     }
@@ -1795,7 +1853,19 @@ mod tests {
         assert!(!heavy.allow_server_fallback);
         assert!(heavy.cdn_urls.is_empty());
         let overlay = entry_for(&manifest_file("_forever_/wow_loader.dll", 1, ""), Some(&build));
-        assert!(overlay.yandex_url.is_none());
-        assert!(overlay.allow_server_fallback);
+        assert!(overlay.yandex_url.is_some());
+        assert!(!overlay.allow_server_fallback);
+        assert!(overlay.cdn_urls.is_empty());
+        for path in [".build.info", "Data/data/0000000008.idx", "Data/indices/abcdef.index", "_forever_/Wow.exe"] {
+            let entry = entry_for(&manifest_file(path, 1, ""), Some(&build));
+            assert!(entry.yandex_url.is_some(), "{path}");
+            assert!(!entry.allow_server_fallback, "{path}");
+            assert!(entry.cdn_urls.is_empty(), "{path}");
+        }
+        build.yandex.as_mut().unwrap().public_url.clear();
+        let entry = entry_for(&manifest_file("Data/data/data.000", 1, ""), Some(&build));
+        assert!(entry.yandex_url.is_none());
+        assert!(!entry.allow_server_fallback);
+        assert!(entry.cdn_urls.is_empty());
     }
 }
