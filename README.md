@@ -2,6 +2,8 @@
 
 Лаунчер для сервера **Дримворлд Навсегда** (WoW Forever, TrinityCore forever).
 
+Актуальные версии, решения и открытые задачи — в [базе знаний](KNOWLEDGE.md).
+
 Репозиторий основан на открытом launcher из проекта
 [`jibay442/forever_docker`](https://github.com/jibay442/forever_docker) (GPL-2.0).
 Он устанавливает и обновляет клиент, выполняет вход через LoginREST bnetserver,
