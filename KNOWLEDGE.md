@@ -40,6 +40,7 @@
 ## Где искать подробности
 
 - [Раздача клиента и результаты проверки 70959](docs/YANDEX-CLIENT.md)
+- [Служебные и скрытые файлы клиента](docs/CLIENT-FILES.md)
 - [Проверка Blizzard CDN для macOS](docs/MACOS-CDN.md)
 - [Самообновление](docs/SELF-UPDATE.md)
 - [Сборка](docs/BUILD.md) и [дорожная карта](docs/ROADMAP.md)
