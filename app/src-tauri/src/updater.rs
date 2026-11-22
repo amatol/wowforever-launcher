@@ -513,8 +513,13 @@ async fn update_client_inner(
     if needs_data_bundle(&root, &manifest) {
         return replace_client_bundle(app, &root, &manifest, build_manifest.as_ref()).await;
     }
-    let total_files = manifest.files.len();
-    let total_bytes: u64 = manifest.files.iter().map(|file| file.size).sum();
+    let checked_files: Vec<&ManifestFile> = manifest
+        .files
+        .iter()
+        .filter(|file| !is_snapshot_index(&manifest, &file.path))
+        .collect();
+    let total_files = checked_files.len();
+    let total_bytes: u64 = checked_files.iter().map(|file| file.size).sum();
     let mut entries = Vec::new();
     let mut checked_bytes = 0u64;
     let mut last_emit = Instant::now();
@@ -534,11 +539,12 @@ async fn update_client_inner(
             },
         );
     }
-    for (index, file) in manifest.files.iter().enumerate() {
-        if is_snapshot_index(&manifest, &file.path) { continue; }
+    for (index, &file) in checked_files.iter().enumerate() {
         let relative = safe_relative(&file.path)?;
         let path = root.join(&relative);
-        let matches = if full && file.full_check {
+        let matches = if full {
+            // Проверка клиента хеширует весь набор, включая data.*, даже если
+            // для обычного обновления достаточно проверять только наличие.
             let path = path.clone();
             let size = file.size;
             let sha = file.sha256.clone();
@@ -546,7 +552,7 @@ async fn update_client_inner(
                 .await
                 .unwrap_or(false)
         } else {
-            file_is_current(&path, file, full)
+            file_is_current(&path, file, false)
         };
         if !matches {
             entries.push(entry_for(file, build_manifest.as_ref()));
@@ -587,6 +593,7 @@ async fn update_client_inner(
     if build_differs {
         let mut present: HashSet<String> = entries.iter().map(|entry| entry.path.clone()).collect();
         for file in &manifest.files {
+            if full && is_snapshot_index(&manifest, &file.path) { continue; }
             if present.insert(file.path.clone()) {
                 entries.push(entry_for(file, build_manifest.as_ref()));
             }
