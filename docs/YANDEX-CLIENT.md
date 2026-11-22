@@ -174,9 +174,9 @@ overlay пуст, минимальный лаунчер — 1.4.30, `yandex.all_
 
 ```bash
 python3 scripts/yandex-client-release.py \
-  --version 20261116-3 --build 1.60.1.70938 \
-  --source-path /1.60.1.70938 \
-  --output /srv/forever-launcher/manifest-70938.json \
+  --version 20261122-1 --build 1.60.1.71037 \
+  --source-path /1.60.1.71037 \
+  --output /srv/forever-launcher/manifest-71037.json \
   --previous-manifest /srv/forever-launcher/manifest.json \
   --workers 4
 ```
