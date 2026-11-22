@@ -510,7 +510,7 @@ async fn update_client_inner(
     let local_build = crate::config::installed_version(&root.join("_forever_")).unwrap_or_default();
     let wanted_build = required_build(build_manifest.as_ref(), &manifest).to_string();
     let build_differs = !wanted_build.is_empty() && local_build != wanted_build;
-    if needs_data_bundle(&root, &manifest) || (full && !manifest.data_revision.is_empty()) {
+    if needs_data_bundle(&root, &manifest) {
         return replace_client_bundle(app, &root, &manifest, build_manifest.as_ref()).await;
     }
     let total_files = manifest.files.len();
@@ -592,17 +592,8 @@ async fn update_client_inner(
             }
         }
     }
-    // Если повреждён хотя бы один архив Data, обновляем весь Data целиком:
-    // архивы и индексы CASC должны быть из одного набора, иначе клиент
-    // может получить несогласованную раскладку.
-    if full && entries.iter().any(|entry| entry.path.starts_with("Data/")) {
-        let mut present: HashSet<String> = entries.iter().map(|entry| entry.path.clone()).collect();
-        for file in &manifest.files {
-            if file.path.starts_with("Data/") && present.insert(file.path.clone()) {
-                entries.push(entry_for(file, build_manifest.as_ref()));
-            }
-        }
-    }
+    // Проверка клиента ничего не заменяет целиком: каждый отличающийся файл
+    // скачивается отдельно с Яндекс Диска.
     let has_stale = manifest
         .removed_files
         .iter()
@@ -610,7 +601,8 @@ async fn update_client_inner(
         .any(|path| safe_relative(path).map(|value| root.join(value).exists()).unwrap_or(false));
 
     if entries.is_empty() && local == manifest.version && !has_stale {
-        emit(app, "client", done_event(0, 0, 0, 0, "Клиент уже обновлён"));
+        let message = if full { "Проверка завершена: все файлы клиента совпадают" } else { "Клиент уже обновлён" };
+        emit(app, "client", done_event(0, 0, 0, 0, message));
         return Ok(());
     }
 
@@ -624,7 +616,8 @@ async fn update_client_inner(
         }
     }
     record_client_state(&root, &manifest)?;
-    emit(app, "client", done_event(0, 0, 0, 0, "Клиент обновлён"));
+    let message = if full { "Проверка клиента завершена" } else { "Клиент обновлён" };
+    emit(app, "client", done_event(0, 0, 0, 0, message));
     Ok(())
 }
 

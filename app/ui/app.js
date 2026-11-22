@@ -465,7 +465,7 @@ async function runUpdate(prefix, command, startKey) {
 
 async function runVerify() {
   if (updating) return;
-  if (!confirm(t('clientRestoreConfirm', { size: clientStatus ? formatBytes(clientStatus.totalBytes) : '~56 GB' }))) return;
+  if (!confirm(t('clientRestoreConfirm'))) return;
   updating = true;
   updatePlayButton();
   $('update-progress').hidden = false;
@@ -755,7 +755,6 @@ $('pick-prefix').addEventListener('click', () => pick($('s-prefix'), t('pickPref
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('settings').hidden) closeSettings(); });
 
 $('check-client').addEventListener('click', runVerify);
-$('update-client').addEventListener('click', () => runUpdate('client', 'update_client', 'clientStarting'));
 $('launcher-update-btn').addEventListener('click', installLauncherUpdate);
 listen('client', ({ payload }) => handleUpdateEvent(payload));
 listen('launcher-update', ({ payload }) => handleLauncherUpdateEvent(payload));
