@@ -88,10 +88,6 @@ pub struct BuildManifest {
     pub yandex: Option<YandexInfo>,
     #[serde(default)]
     pub overlay: Vec<String>,
-    /// Полная переустановка клиента при каждом обновлении: скачать весь набор
-    /// заново, сохранить только WTF и Interface, старую папку удалить.
-    #[serde(default)]
-    pub full_reinstall: bool,
     #[serde(default)]
     pub fallback_manifest: String,
 }
@@ -405,18 +401,6 @@ fn record_client_state(root: &Path, manifest: &ClientManifest) -> Result<(), Str
     write_client_state(root, &state)
 }
 
-fn needs_full_reinstall(root: &Path, manifest: &ClientManifest, build: Option<&BuildManifest>) -> bool {
-    let Some(build) = build else { return false };
-    if !build.full_reinstall {
-        return false;
-    }
-    let local = read_client_state(root).manifest_version;
-    let local_build = crate::config::installed_version(&root.join("_forever_")).unwrap_or_default();
-    let wanted_build = required_build(Some(build), manifest);
-    let build_differs = !wanted_build.is_empty() && local_build != wanted_build;
-    local != manifest.version || build_differs
-}
-
 fn file_size(path: &Path) -> Option<u64> {
     std::fs::metadata(path).ok().map(|meta| meta.len())
 }
@@ -489,12 +473,6 @@ pub async fn client_status(settings: &Settings) -> Result<ClientStatus, String> 
         changed_files = manifest.files.len();
         changed_bytes = manifest.files.iter().map(|file| file.size).sum();
     }
-    if needs_full_reinstall(&root, &manifest, build_manifest.as_ref()) {
-        // Полная переустановка: показываем реальный объём, даже если
-        // отдельные файлы уже совпали по размеру.
-        changed_files = manifest.files.len();
-        changed_bytes = manifest.files.iter().map(|file| file.size).sum();
-    }
     // Отсутствие файла состояния у готового клиента не делает его устаревшим:
     // сравниваем реальные размеры файлов и build из .build.info.
     let up_to_date = changed_files == 0;
@@ -532,13 +510,6 @@ async fn update_client_inner(
     let local_build = crate::config::installed_version(&root.join("_forever_")).unwrap_or_default();
     let wanted_build = required_build(build_manifest.as_ref(), &manifest).to_string();
     let build_differs = !wanted_build.is_empty() && local_build != wanted_build;
-    let full_reinstall = build_manifest
-        .as_ref()
-        .map(|build| build.full_reinstall)
-        .unwrap_or(false);
-    if full_reinstall && (full || needs_full_reinstall(&root, &manifest, build_manifest.as_ref())) {
-        return reinstall_client(app, &root, &manifest, build_manifest.as_ref()).await;
-    }
     if needs_data_bundle(&root, &manifest) || (full && !manifest.data_revision.is_empty()) {
         return replace_client_bundle(app, &root, &manifest, build_manifest.as_ref()).await;
     }
@@ -689,16 +660,6 @@ pub async fn install_client(
     let build_manifest = fetch_build_manifest(settings).await;
     std::fs::create_dir_all(root)
         .map_err(|error| format!("Не удалось создать папку {}: {error}", root.display()))?;
-    let full_reinstall = build_manifest
-        .as_ref()
-        .map(|build| build.full_reinstall)
-        .unwrap_or(false);
-    if full_reinstall
-        && (read_client_state(root).manifest_version != manifest.version
-            || needs_data_bundle(root, &manifest))
-    {
-        return reinstall_client(app, root, &manifest, build_manifest.as_ref()).await;
-    }
     if needs_data_bundle(root, &manifest) {
         return replace_client_bundle(app, root, &manifest, build_manifest.as_ref()).await;
     }
@@ -718,345 +679,6 @@ pub async fn install_client(
     record_client_state(root, &manifest)?;
     emit(app, "client", done_event(0, 0, 0, 0, "Клиент установлен"));
     Ok(())
-}
-
-/// Полная переустановка клиента: скачать весь набор заново, сохранить только
-/// пользовательские `WTF` и `Interface`, старую папку удалить после успеха.
-async fn reinstall_client(
-    app: &AppHandle,
-    root: &Path,
-    manifest: &ClientManifest,
-    build_manifest: Option<&BuildManifest>,
-) -> Result<(), String> {
-    if manifest.version.is_empty()
-        || manifest.version.len() > 80
-        || !manifest.version.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_' || c == b'.')
-    {
-        return Err("Некорректная версия клиента для полной переустановки".into());
-    }
-    let stage = root.join(format!(".forever-update-{}", manifest.version));
-    let old_data = root.join(format!(".forever-old-data-{}", manifest.version));
-    let old_forever = root.join(format!(".forever-old-forever-{}", manifest.version));
-
-    // Если прошлая версия лаунчера успела перенести WTF/Interface в staging,
-    // возвращаем их в клиент до начала новой установки.
-    if stage.exists() {
-        for directory in ["WTF", "Interface"] {
-            let source = stage.join(directory);
-            if !source.exists() {
-                continue;
-            }
-            let destination = root.join(directory);
-            if destination.exists() {
-                merge_directory(&source, &destination)?;
-            } else {
-                std::fs::rename(&source, &destination)
-                    .map_err(|error| format!("Не удалось вернуть {}: {error}", directory))?;
-            }
-            emit(
-                app,
-                "client",
-                UpdateEvent {
-                    kind: "log".into(),
-                    file: String::new(),
-                    current: 0,
-                    total: 0,
-                    downloaded: 0,
-                    total_bytes: 0,
-                    percent: 0.0,
-                    message: format!("Восстановлена пользовательская папка {directory} из staging"),
-                },
-            );
-        }
-    }
-
-    // Восстанавливаем незавершённую замену Data/_forever_ или убираем
-    // остатки уже успешной замены.
-    if old_data.exists() {
-        if root.join("Data").exists() {
-            std::fs::remove_dir_all(&old_data)
-                .map_err(|error| format!("Не удалось удалить старую Data: {error}"))?;
-        } else {
-            std::fs::rename(&old_data, root.join("Data"))
-                .map_err(|error| format!("Не удалось восстановить старую Data: {error}"))?;
-        }
-    }
-    if old_forever.exists() {
-        if root.join("_forever_/Wow.exe").is_file() {
-            return Err(format!("Сохранена предыдущая папка {}. Проверьте в ней WTF и Interface перед повторной установкой; автоматически она не удаляется.", old_forever.display()));
-        } else {
-            if root.join("_forever_").exists() {
-                return Err(format!("Найдены две папки _forever_: текущая и {}. Сохраните WTF/Interface из обеих перед восстановлением; автоматически они не удаляются.", old_forever.display()));
-            }
-            std::fs::rename(&old_forever, root.join("_forever_"))
-                .map_err(|error| format!("Не удалось восстановить старую _forever_: {error}"))?;
-        }
-    }
-
-    // Чужие и старые staging-папки не удаляем: там могут остаться данные игрока.
-
-    std::fs::create_dir_all(&stage)
-        .map_err(|error| format!("Не удалось создать папку установки {}: {error}", stage.display()))?;
-
-    emit(
-        app,
-        "client",
-        UpdateEvent {
-            kind: "start".into(),
-            file: String::new(),
-            current: 0,
-            total: manifest.files.len(),
-            downloaded: 0,
-            total_bytes: manifest.files.iter().map(|file| file.size).sum(),
-            percent: 0.0,
-            message: "Полная переустановка клиента".into(),
-        },
-    );
-
-    let mut entries = Vec::new();
-    client_phase(app, "Проверяем ранее скачанные файлы…");
-    for (index, file) in manifest.files.iter().enumerate() {
-        let relative = safe_relative(&file.path)?;
-        let path = stage.join(&relative);
-        let size = file.size;
-        let sha = file.sha256.clone();
-        let valid = tokio::task::spawn_blocking(move || file_matches(&path, size, &sha, true))
-            .await
-            .map_err(|error| error.to_string())?;
-        if !valid {
-            if is_data_archive(&file.path) {
-                client_phase(app, &format!("Сравниваем локальный архив по SHA-256: {}…", file.path));
-                let source = root.join(&relative);
-                let destination = stage.join(&relative);
-                let file = file.clone();
-                let reused = tokio::task::spawn_blocking(move || reuse_matching_archive(&source, &destination, &file))
-                    .await.map_err(|e| e.to_string())??;
-                if reused {
-                    client_phase(app, &format!("{}: SHA-256 совпадает, повторная загрузка не нужна", relative.display()));
-                    continue;
-                }
-            }
-            entries.push(entry_for(file, build_manifest));
-        }
-        if index % 25 == 0 || index + 1 == manifest.files.len() {
-            client_phase(app, &format!("Проверка загрузки: {}/{} · {}", index + 1, manifest.files.len(), file.path));
-        }
-    }
-    download_entries(app, "client", &stage, entries, DOWNLOAD_CONCURRENCY).await?;
-
-    client_phase(app, "Загрузка завершена. Проверяем комплектность клиента…");
-    for file in &manifest.files {
-        let path = stage.join(safe_relative(&file.path)?);
-        if !path.is_file() {
-            return Err(format!("После загрузки отсутствует файл {}", file.path));
-        }
-    }
-    if !stage.join("Data/data").is_dir() || !stage.join("_forever_/Wow.exe").is_file() {
-        return Err("Полный набор клиента не содержит Data/data или _forever_/Wow.exe".into());
-    }
-
-    client_phase(app, "Сохраняем настройки и аддоны из _forever_/WTF и _forever_/Interface…");
-    preserve_user_directories(root, &stage)?;
-
-    // Меняем только игровые каталоги. Саму папку клиента не переименовываем:
-    // в ней может лежать запущенный лаунчер, Explorer или антивирус.
-    emit(
-        app,
-        "client",
-        UpdateEvent {
-            kind: "log".into(),
-            file: String::new(),
-            current: manifest.files.len(),
-            total: manifest.files.len(),
-            downloaded: 0,
-            total_bytes: 0,
-            percent: 99.0,
-            message: "Загрузка завершена, заменяем Data и _forever_…".into(),
-        },
-    );
-
-    let had_data = root.join("Data").exists();
-    if had_data {
-        std::fs::rename(root.join("Data"), &old_data)
-            .map_err(|error| format!("Не удалось переместить старую Data: {error}"))?;
-    }
-    let had_forever = root.join("_forever_").exists();
-    if had_forever {
-        if let Err(error) = std::fs::rename(root.join("_forever_"), &old_forever) {
-            if had_data {
-                let _ = std::fs::rename(&old_data, root.join("Data"));
-            }
-            return Err(format!("Не удалось переместить старую _forever_: {error}"));
-        }
-    }
-    if let Err(error) = std::fs::rename(stage.join("Data"), root.join("Data")) {
-        if had_forever {
-            let _ = std::fs::rename(&old_forever, root.join("_forever_"));
-        }
-        if had_data {
-            let _ = std::fs::rename(&old_data, root.join("Data"));
-        }
-        return Err(format!("Не удалось установить новую Data: {error}"));
-    }
-    if let Err(error) = std::fs::rename(stage.join("_forever_"), root.join("_forever_")) {
-        let _ = std::fs::rename(root.join("Data"), stage.join("Data"));
-        if had_forever {
-            let _ = std::fs::rename(&old_forever, root.join("_forever_"));
-        }
-        if had_data {
-            let _ = std::fs::rename(&old_data, root.join("Data"));
-        }
-        return Err(format!("Не удалось установить новую _forever_: {error}"));
-    }
-
-    // Остальные файлы манифеста (например, .build.info) копируем поверх.
-    for file in &manifest.files {
-        if file.path.starts_with("Data/") || file.path.starts_with("_forever_/") {
-            continue;
-        }
-        let relative = safe_relative(&file.path)?;
-        let source = stage.join(&relative);
-        let destination = root.join(&relative);
-        if let Some(parent) = destination.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        }
-        std::fs::copy(&source, &destination)
-            .map_err(|error| format!("Не удалось установить {}: {error}", file.path))?;
-    }
-
-    record_client_state(root, &manifest)?;
-
-    client_phase(app, "Клиент установлен. Удаляем старые игровые файлы; резерв настроек остаётся в .forever-user-backups…");
-    if old_data.exists() {
-        if let Err(error) = std::fs::remove_dir_all(&old_data) {
-            eprintln!("не удалось удалить старую Data {}: {error}", old_data.display());
-        }
-    }
-    if old_forever.exists() {
-        if let Err(error) = std::fs::remove_dir_all(&old_forever) {
-            eprintln!("не удалось удалить старую _forever_ {}: {error}", old_forever.display());
-        }
-    }
-    // Старые служебные каталоги клиента; WTF и Interface не трогаем.
-    for directory in ["Cache", "Errors", "Logs"] {
-        let path = root.join(directory);
-        if path.is_dir() {
-            let _ = std::fs::remove_dir_all(path);
-        }
-    }
-    let _ = std::fs::remove_dir_all(&stage);
-    emit(app, "client", done_event(0, 0, 0, 0, "Клиент переустановлен полностью"));
-    Ok(())
-}
-
-/// Переносит содержимое каталога в целевой, не теряя уже существующие файлы.
-/// Нужен для восстановления WTF/Interface из staging после неудачной замены.
-fn merge_directory(source: &Path, destination: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(destination)
-        .map_err(|error| format!("Не удалось создать {}: {error}", destination.display()))?;
-    let entries = std::fs::read_dir(source)
-        .map_err(|error| format!("Не удалось прочитать {}: {error}", source.display()))?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let target = destination.join(entry.file_name());
-        let file_type = entry.file_type().map_err(|error| error.to_string())?;
-        if file_type.is_dir() {
-            if target.exists() && !target.is_dir() {
-                std::fs::remove_file(&target).map_err(|error| error.to_string())?;
-            }
-            merge_directory(&path, &target)?;
-        } else {
-            if target.exists() {
-                if target.is_dir() {
-                    std::fs::remove_dir_all(&target).map_err(|error| error.to_string())?;
-                } else {
-                    std::fs::remove_file(&target).map_err(|error| error.to_string())?;
-                }
-            }
-            std::fs::rename(&path, &target)
-                .map_err(|error| format!("Не удалось перенести {}: {error}", path.display()))?;
-        }
-    }
-    let _ = std::fs::remove_dir(source);
-    Ok(())
-}
-
-/// Копирование без удаления источника; ссылки не разыменовываем за пределы клиента.
-fn copy_user_directory(source: &Path, destination: &Path) -> Result<(), String> {
-    let meta = std::fs::symlink_metadata(source).map_err(|e| format!("{}: {e}", source.display()))?;
-    if meta.file_type().is_symlink() {
-        return Err(format!("Папка настроек содержит ссылку {}. Исходные данные сохранены; требуется ручная проверка ссылки.", source.display()));
-    }
-    if meta.is_dir() {
-        std::fs::create_dir_all(destination).map_err(|e| e.to_string())?;
-        for entry in std::fs::read_dir(source).map_err(|e| e.to_string())? {
-            let entry = entry.map_err(|e| e.to_string())?;
-            copy_user_directory(&entry.path(), &destination.join(entry.file_name()))?;
-        }
-    } else {
-        std::fs::copy(source, destination).map_err(|e| format!("{}: {e}", source.display()))?;
-    }
-    Ok(())
-}
-
-fn preserve_user_directories(root: &Path, stage: &Path) -> Result<(), String> {
-    // Уникальный резерв не входит ни в staging, ни в заменяемый _forever_.
-    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?.as_nanos();
-    let backup = root.join(".forever-user-backups").join(stamp.to_string());
-    for relative in ["WTF", "Interface", "_forever_/WTF", "_forever_/Interface"] {
-        let source = root.join(relative);
-        match std::fs::symlink_metadata(&source) {
-            Ok(_) => {},
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(format!("Не удалось проверить {}: {e}", source.display())),
-        }
-        let saved = backup.join(relative);
-        if let Some(parent) = saved.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        copy_user_directory(&source, &saved)?;
-        if relative.starts_with("_forever_/") {
-            let target = stage.join(relative);
-            // Копируем из сохранённого резерва; ошибка прерывает замену каталогов.
-            copy_user_directory(&saved, &target)?;
-        }
-    }
-    Ok(())
-}
-
-fn client_phase(app: &AppHandle, message: &str) {
-    emit(app, "client", UpdateEvent {
-        kind: "log".into(), file: String::new(), current: 0, total: 0,
-        downloaded: 0, total_bytes: 0, percent: 0.0, message: message.into(),
-    });
-}
-
-fn is_data_archive(path: &str) -> bool {
-    path.strip_prefix("Data/data/data.")
-        .map(|suffix| suffix.len() == 3 && suffix.bytes().all(|b| b.is_ascii_digit()))
-        .unwrap_or(false)
-}
-
-/// Только целые совпавшие архивы. Копия в staging независима от изменяемого
-/// клиентом источника; после копирования SHA-256 проверяется ещё раз.
-fn reuse_matching_archive(source: &Path, destination: &Path, file: &ManifestFile) -> Result<bool, String> {
-    if !is_data_archive(&file.path) || !file_matches(source, file.size, &file.sha256, true) {
-        return Ok(false);
-    }
-    if let Some(parent) = destination.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let temporary = destination.with_extension("reuse-part");
-    let result = (|| {
-        std::fs::copy(source, &temporary).map_err(|e| format!("Копирование {}: {e}", file.path))?;
-        if !file_matches(&temporary, file.size, &file.sha256, true) { return Ok(false); }
-        if destination.exists() { std::fs::remove_file(destination).map_err(|e| e.to_string())?; }
-        std::fs::rename(&temporary, destination).map_err(|e| e.to_string())?;
-        Ok(true)
-    })();
-    if temporary.exists() { let _ = std::fs::remove_file(temporary); }
-    result
 }
 
 fn needs_data_bundle(root: &Path, manifest: &ClientManifest) -> bool {
@@ -1648,100 +1270,6 @@ mod tests {
     }
 
     #[test]
-    fn reinstall_preserves_nested_user_data_and_backup() {
-        let marker = temp_file(b"preserve");
-        let root = marker.with_extension("client");
-        let stage = root.join(".forever-update-test");
-        for relative in ["WTF", "Interface", "_forever_/WTF", "_forever_/Interface"] {
-            std::fs::create_dir_all(root.join(relative)).unwrap();
-            std::fs::write(root.join(relative).join("custom.txt"), relative).unwrap();
-        }
-        std::fs::create_dir_all(stage.join("_forever_")).unwrap();
-        std::fs::write(stage.join("_forever_/Wow.exe"), b"new game").unwrap();
-        preserve_user_directories(&root, &stage).unwrap();
-        for relative in ["_forever_/WTF", "_forever_/Interface"] {
-            assert_eq!(std::fs::read(stage.join(relative).join("custom.txt")).unwrap(), relative.as_bytes());
-            assert!(root.join(relative).join("custom.txt").exists());
-        }
-        let backup = std::fs::read_dir(root.join(".forever-user-backups")).unwrap().next().unwrap().unwrap().path();
-        for relative in ["WTF", "Interface", "_forever_/WTF", "_forever_/Interface"] {
-            assert_eq!(std::fs::read(backup.join(relative).join("custom.txt")).unwrap(), relative.as_bytes());
-        }
-        assert_eq!(std::fs::read(stage.join("_forever_/Wow.exe")).unwrap(), b"new game");
-        std::fs::remove_dir_all(root).unwrap();
-        std::fs::remove_file(marker).unwrap();
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn user_backup_refuses_symlinks_without_deleting_originals() {
-        let marker = temp_file(b"symlink");
-        let root = marker.with_extension("client");
-        let stage = root.join(".forever-update-test");
-        std::fs::create_dir_all(root.join("_forever_/WTF")).unwrap();
-        std::fs::write(root.join("_forever_/WTF/Config.wtf"), b"my settings").unwrap();
-        std::os::unix::fs::symlink("WTF", root.join("_forever_/Interface")).unwrap();
-        assert!(preserve_user_directories(&root, &stage).is_err());
-        assert_eq!(std::fs::read(root.join("_forever_/WTF/Config.wtf")).unwrap(), b"my settings");
-        assert!(root.join("_forever_/Interface").is_symlink());
-        std::fs::remove_dir_all(root).unwrap();
-        std::fs::remove_file(marker).unwrap();
-    }
-
-    #[test]
-    fn archive_reuse_requires_exact_content_not_just_build_or_size() {
-        let source = temp_file(b"same archive");
-        let destination = source.with_extension("reused");
-        let file = manifest_file("Data/data/data.000", 12, &hex::encode(Sha256::digest(b"same archive")));
-        assert!(reuse_matching_archive(&source, &destination, &file).unwrap());
-        assert_eq!(std::fs::read(&destination).unwrap(), b"same archive");
-        std::fs::remove_file(&destination).unwrap();
-        std::fs::write(&source, b"bad! archive").unwrap();
-        assert!(!reuse_matching_archive(&source, &destination, &file).unwrap());
-        assert!(!destination.exists());
-        let index = manifest_file("Data/data/0000000008.idx", 12, &hex::encode(Sha256::digest(b"bad! archive")));
-        assert!(!reuse_matching_archive(&source, &destination, &index).unwrap());
-        assert!(!is_data_archive("Data/data/data.000/other"));
-        assert!(!is_data_archive("Data/data/data.idx"));
-        std::fs::remove_file(&source).unwrap();
-    }
-
-    #[test]
-    fn user_data_merge_keeps_both_sides() {
-        let path = temp_file(b"merge");
-        let source = path.with_extension("source");
-        let target = path.with_extension("target");
-        std::fs::create_dir_all(source.join("AddOns")).unwrap();
-        std::fs::create_dir_all(target.join("AddOns")).unwrap();
-        std::fs::write(source.join("Config.wtf"), b"new").unwrap();
-        std::fs::write(target.join("Config.wtf"), b"old").unwrap();
-        std::fs::write(source.join("AddOns/a.txt"), b"a").unwrap();
-        std::fs::write(target.join("AddOns/b.txt"), b"b").unwrap();
-        merge_directory(&source, &target).unwrap();
-        assert_eq!(std::fs::read(target.join("Config.wtf")).unwrap(), b"new");
-        assert_eq!(std::fs::read(target.join("AddOns/a.txt")).unwrap(), b"a");
-        assert_eq!(std::fs::read(target.join("AddOns/b.txt")).unwrap(), b"b");
-        std::fs::remove_dir_all(target).unwrap();
-        std::fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn full_reinstall_is_satisfied_by_recorded_version() {
-        let path = temp_file(b"marker");
-        let root = path.with_extension("client");
-        std::fs::create_dir(&root).unwrap();
-        let manifest: ClientManifest = serde_json::from_str(r#"{"version":"v2","build":"","data_revision":"fixed","files":[]}"#).unwrap();
-        let mut build = build_manifest();
-        build.build.clear();
-        build.full_reinstall = true;
-        assert!(needs_full_reinstall(&root, &manifest, Some(&build)));
-        write_client_state(&root, &ClientState { manifest_version: "v2".into(), data_revision: "fixed".into() }).unwrap();
-        assert!(!needs_full_reinstall(&root, &manifest, Some(&build)));
-        std::fs::remove_dir_all(root).unwrap();
-        std::fs::remove_file(path).unwrap();
-    }
-
-    #[test]
     fn legacy_markers_are_migrated_into_one_state_file() {
         let path = temp_file(b"state");
         let root = path.with_extension("client");
@@ -1861,7 +1389,6 @@ mod tests {
             }),
             yandex: None,
             overlay: vec!["_forever_/wow_loader.dll".into()],
-            full_reinstall: false,
             fallback_manifest: "manifest.json".into(),
         }
     }

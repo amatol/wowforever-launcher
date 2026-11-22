@@ -504,23 +504,6 @@ async function runRepair() {
   }
 }
 
-async function removePatch() {
-  if (preparing || updating) return;
-  if (!confirm(t('removePatchConfirm'))) return;
-  preparing = true;
-  updatePlayButton();
-  try {
-    await invoke('remove_patch');
-    toast(t('removePatchDone'));
-  } catch (e) {
-    toast(t('removePatchFailed', { e }));
-  } finally {
-    preparing = false;
-    await refreshSetupChecks();
-    updatePlayButton();
-  }
-}
-
 // ------------------------------------------------------------------------------------------------ state
 // '' follows the system language; Rust gets the same language for its messages
 function setLanguage(setting) {
@@ -773,7 +756,6 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('sett
 
 $('check-client').addEventListener('click', runVerify);
 $('update-client').addEventListener('click', () => runUpdate('client', 'update_client', 'clientStarting'));
-$('remove-patch').addEventListener('click', removePatch);
 $('launcher-update-btn').addEventListener('click', installLauncherUpdate);
 listen('client', ({ payload }) => handleUpdateEvent(payload));
 listen('launcher-update', ({ payload }) => handleLauncherUpdateEvent(payload));

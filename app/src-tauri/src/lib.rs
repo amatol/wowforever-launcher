@@ -285,12 +285,6 @@ async fn repair(state: State<'_, AppState>) -> Result<system::Checks, String> {
 }
 
 #[tauri::command]
-async fn remove_patch(state: State<'_, AppState>) -> Result<(), String> {
-    let settings = state.settings.lock().unwrap().clone();
-    tokio::task::spawn_blocking(move || system::remove(&settings)).await.map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
 fn hide_launcher(window: tauri::Window) {
     let _ = window.hide();
 }
@@ -499,7 +493,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(AppState { settings: Mutex::new(Settings::load()), playing: AtomicBool::new(false) })
         .invoke_handler(tauri::generate_handler![
-            get_state, save_settings, set_language, detect_locale, login, logout, server_status, news, prepare_client_config, client_status, update_client, verify_client, install_client, launcher_update_status, install_launcher_update, checks, repair, remove_patch, refresh_session, hide_launcher, show_launcher, quit_launcher, schedule_quit, cancel_quit, play
+            get_state, save_settings, set_language, detect_locale, login, logout, server_status, news, prepare_client_config, client_status, update_client, verify_client, install_client, launcher_update_status, install_launcher_update, checks, repair, refresh_session, hide_launcher, show_launcher, quit_launcher, schedule_quit, cancel_quit, play
         ])
         .run(tauri::generate_context!())
         .expect("error while running Дримворлд Навсегда");

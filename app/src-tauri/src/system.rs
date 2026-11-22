@@ -137,6 +137,8 @@ mod imp {
     }
 
     /// Removes the hosts entry and the CA from the Windows trust store (one UAC prompt).
+    // Кнопка удаления убрана из UI; функция оставлена для ручного обслуживания.
+    #[allow(dead_code)]
     pub fn remove(settings: &Settings) -> Result<(), String> {
         if !valid_portal(&settings.server.portal) {
             return Err(t("bad_portal").into());
@@ -309,6 +311,8 @@ killall -HUP mDNSResponder || true
         if errors.is_empty() { Ok(()) } else { Err(errors.join(" ; ")) }
     }
 
+    // Кнопка удаления убрана из UI; функция оставлена для ручного обслуживания.
+    #[allow(dead_code)]
     pub fn remove(settings: &Settings) -> Result<(), String> {
         let mut errors = Vec::new();
         let portal = &settings.server.portal;
@@ -613,6 +617,8 @@ rm -f "$t""#;
         if errors.is_empty() { Ok(()) } else { Err(errors.join(" ; ")) }
     }
 
+    // Кнопка удаления убрана из UI; функция оставлена для ручного обслуживания.
+    #[allow(dead_code)]
     pub fn remove(settings: &Settings) -> Result<(), String> {
         let mut errors = Vec::new();
         let portal = &settings.server.portal;
