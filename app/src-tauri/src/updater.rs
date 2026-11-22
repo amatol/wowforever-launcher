@@ -337,18 +337,72 @@ fn yandex_url_for(path: &str, build: Option<&BuildManifest>) -> Option<String> {
     Some(url.into())
 }
 
-fn local_version(root: &Path) -> String {
-    std::fs::read_to_string(root.join(".launcher_version"))
+/// Единое состояние установленного клиента. Заменяет прежние отдельные
+/// маркеры `.launcher_version`, `.forever_data_revision` и
+/// `.forever_full_reinstall`.
+const CLIENT_STATE_FILE: &str = ".forever_state.json";
+const LEGACY_VERSION_FILE: &str = ".launcher_version";
+const LEGACY_DATA_REVISION_FILE: &str = ".forever_data_revision";
+const LEGACY_FULL_REINSTALL_FILE: &str = ".forever_full_reinstall";
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct ClientState {
+    #[serde(default)]
+    manifest_version: String,
+    #[serde(default)]
+    data_revision: String,
+}
+
+fn read_legacy_marker(root: &Path, name: &str) -> String {
+    std::fs::read_to_string(root.join(name))
         .map(|value| value.trim().to_string())
         .unwrap_or_default()
 }
 
-const FULL_REINSTALL_MARKER: &str = ".forever_full_reinstall";
+/// Читает состояние и один раз переносит старые маркеры. Без миграции
+/// обновление 1.4.31 посчитало бы установленный клиент новым и заново
+/// скачало бы весь набор.
+fn read_client_state(root: &Path) -> ClientState {
+    if let Ok(text) = std::fs::read_to_string(root.join(CLIENT_STATE_FILE)) {
+        if let Ok(state) = serde_json::from_str::<ClientState>(&text) {
+            return state;
+        }
+    }
+    let state = ClientState {
+        manifest_version: read_legacy_marker(root, LEGACY_VERSION_FILE),
+        data_revision: read_legacy_marker(root, LEGACY_DATA_REVISION_FILE),
+    };
+    if !state.manifest_version.is_empty() || !state.data_revision.is_empty() {
+        let _ = write_client_state(root, &state);
+    }
+    state
+}
 
-fn full_reinstall_is_done(root: &Path, version: &str) -> bool {
-    std::fs::read_to_string(root.join(FULL_REINSTALL_MARKER))
-        .map(|value| value.trim() == version)
-        .unwrap_or(false)
+fn write_client_state(root: &Path, state: &ClientState) -> Result<(), String> {
+    let mut data = serde_json::to_vec_pretty(state).map_err(|error| error.to_string())?;
+    data.push(b'\n');
+    std::fs::write(root.join(CLIENT_STATE_FILE), data)
+        .map_err(|error| format!("Не удалось записать состояние клиента: {error}"))?;
+    // Старые файлы удаляем только после успешной записи нового состояния.
+    for legacy in [
+        LEGACY_VERSION_FILE,
+        LEGACY_DATA_REVISION_FILE,
+        LEGACY_FULL_REINSTALL_FILE,
+    ] {
+        let _ = std::fs::remove_file(root.join(legacy));
+    }
+    Ok(())
+}
+
+/// Обновляет состояние после успешной установки. Пустая ревизия в манифесте
+/// не стирает уже известную: инкрементальное обновление может её не содержать.
+fn record_client_state(root: &Path, manifest: &ClientManifest) -> Result<(), String> {
+    let mut state = read_client_state(root);
+    state.manifest_version = manifest.version.clone();
+    if !manifest.data_revision.is_empty() {
+        state.data_revision = manifest.data_revision.clone();
+    }
+    write_client_state(root, &state)
 }
 
 fn needs_full_reinstall(root: &Path, manifest: &ClientManifest, build: Option<&BuildManifest>) -> bool {
@@ -356,13 +410,11 @@ fn needs_full_reinstall(root: &Path, manifest: &ClientManifest, build: Option<&B
     if !build.full_reinstall {
         return false;
     }
-    let local = local_version(root);
+    let local = read_client_state(root).manifest_version;
     let local_build = crate::config::installed_version(&root.join("_forever_")).unwrap_or_default();
     let wanted_build = required_build(Some(build), manifest);
     let build_differs = !wanted_build.is_empty() && local_build != wanted_build;
-    local != manifest.version
-        || build_differs
-        || !full_reinstall_is_done(root, &manifest.version)
+    local != manifest.version || build_differs
 }
 
 fn file_size(path: &Path) -> Option<u64> {
@@ -411,7 +463,7 @@ pub async fn client_status(settings: &Settings) -> Result<ClientStatus, String> 
     let manifest = fetch_client_manifest(settings).await?;
     let build_manifest = fetch_build_manifest(settings).await;
     let root = client_root(settings)?;
-    let local = local_version(&root);
+    let local = read_client_state(&root).manifest_version;
     let local_build = crate::config::installed_version(&root.join("_forever_")).unwrap_or_default();
     let wanted_build = required_build(build_manifest.as_ref(), &manifest).to_string();
     let build_differs = !wanted_build.is_empty() && local_build != wanted_build;
@@ -443,7 +495,7 @@ pub async fn client_status(settings: &Settings) -> Result<ClientStatus, String> 
         changed_files = manifest.files.len();
         changed_bytes = manifest.files.iter().map(|file| file.size).sum();
     }
-    // Отсутствие .launcher_version у готового клиента не делает его устаревшим:
+    // Отсутствие файла состояния у готового клиента не делает его устаревшим:
     // сравниваем реальные размеры файлов и build из .build.info.
     let up_to_date = changed_files == 0;
     Ok(ClientStatus {
@@ -476,7 +528,7 @@ async fn update_client_inner(
     let manifest = fetch_client_manifest(settings).await?;
     let build_manifest = fetch_build_manifest(settings).await;
     let root = client_root(settings)?;
-    let local = local_version(&root);
+    let local = read_client_state(&root).manifest_version;
     let local_build = crate::config::installed_version(&root.join("_forever_")).unwrap_or_default();
     let wanted_build = required_build(build_manifest.as_ref(), &manifest).to_string();
     let build_differs = !wanted_build.is_empty() && local_build != wanted_build;
@@ -600,8 +652,7 @@ async fn update_client_inner(
             let _ = std::fs::remove_file(&path);
         }
     }
-    std::fs::write(root.join(".launcher_version"), format!("{}\n", manifest.version))
-        .map_err(|error| format!("Не удалось записать версию клиента: {error}"))?;
+    record_client_state(&root, &manifest)?;
     emit(app, "client", done_event(0, 0, 0, 0, "Клиент обновлён"));
     Ok(())
 }
@@ -642,9 +693,9 @@ pub async fn install_client(
         .as_ref()
         .map(|build| build.full_reinstall)
         .unwrap_or(false);
-    if full_reinstall && (local_version(root) != manifest.version
-        || needs_data_bundle(root, &manifest)
-        || !full_reinstall_is_done(root, &manifest.version))
+    if full_reinstall
+        && (read_client_state(root).manifest_version != manifest.version
+            || needs_data_bundle(root, &manifest))
     {
         return reinstall_client(app, root, &manifest, build_manifest.as_ref()).await;
     }
@@ -664,8 +715,7 @@ pub async fn install_client(
         return Ok(());
     }
     download_entries(app, "client", root, entries, DOWNLOAD_CONCURRENCY).await?;
-    std::fs::write(root.join(".launcher_version"), format!("{}\n", manifest.version))
-        .map_err(|error| format!("Не удалось записать версию клиента: {error}"))?;
+    record_client_state(root, &manifest)?;
     emit(app, "client", done_event(0, 0, 0, 0, "Клиент установлен"));
     Ok(())
 }
@@ -874,14 +924,7 @@ async fn reinstall_client(
             .map_err(|error| format!("Не удалось установить {}: {error}", file.path))?;
     }
 
-    if !manifest.data_revision.is_empty() {
-        std::fs::write(root.join(".forever_data_revision"), format!("{}\n", manifest.data_revision))
-            .map_err(|error| format!("Не удалось записать ревизию клиента: {error}"))?;
-    }
-    std::fs::write(root.join(".launcher_version"), format!("{}\n", manifest.version))
-        .map_err(|error| format!("Не удалось записать версию клиента: {error}"))?;
-    std::fs::write(root.join(FULL_REINSTALL_MARKER), format!("{}\n", manifest.version))
-        .map_err(|error| format!("Не удалось записать маркер полной установки: {error}"))?;
+    record_client_state(root, &manifest)?;
 
     client_phase(app, "Клиент установлен. Удаляем старые игровые файлы; резерв настроек остаётся в .forever-user-backups…");
     if old_data.exists() {
@@ -1018,9 +1061,7 @@ fn reuse_matching_archive(source: &Path, destination: &Path, file: &ManifestFile
 
 fn needs_data_bundle(root: &Path, manifest: &ClientManifest) -> bool {
     !manifest.data_revision.is_empty()
-        && (std::fs::read_to_string(root.join(".forever_data_revision"))
-            .map(|s| s.trim() != manifest.data_revision)
-            .unwrap_or(true)
+        && (read_client_state(root).data_revision != manifest.data_revision
             || manifest.files.iter().any(|file| file.path.starts_with("Data/")
                 && !is_snapshot_index(manifest, &file.path)
                 && !root.join(&file.path).is_file()))
@@ -1096,8 +1137,7 @@ async fn replace_client_bundle(
         std::fs::copy(stage.join(relative), destination).map_err(|e| format!("{}: {e}", file.path))?;
     }
     // Маркер записывается только после успешной установки всего набора.
-    std::fs::write(root.join(".forever_data_revision"), format!("{}\n", manifest.data_revision)).map_err(|e| e.to_string())?;
-    std::fs::write(root.join(".launcher_version"), format!("{}\n", manifest.version)).map_err(|e| e.to_string())?;
+    record_client_state(root, &manifest)?;
     // Это только созданные нами служебные папки, не пользовательские каталоги.
     if had_data { let _ = std::fs::remove_dir_all(&backup); }
     let _ = std::fs::remove_dir_all(&stage);
@@ -1686,7 +1726,7 @@ mod tests {
     }
 
     #[test]
-    fn full_reinstall_requires_its_own_marker() {
+    fn full_reinstall_is_satisfied_by_recorded_version() {
         let path = temp_file(b"marker");
         let root = path.with_extension("client");
         std::fs::create_dir(&root).unwrap();
@@ -1694,10 +1734,46 @@ mod tests {
         let mut build = build_manifest();
         build.build.clear();
         build.full_reinstall = true;
-        std::fs::write(root.join(".launcher_version"), "v2\n").unwrap();
         assert!(needs_full_reinstall(&root, &manifest, Some(&build)));
-        std::fs::write(root.join(FULL_REINSTALL_MARKER), "v2\n").unwrap();
+        write_client_state(&root, &ClientState { manifest_version: "v2".into(), data_revision: "fixed".into() }).unwrap();
         assert!(!needs_full_reinstall(&root, &manifest, Some(&build)));
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn legacy_markers_are_migrated_into_one_state_file() {
+        let path = temp_file(b"state");
+        let root = path.with_extension("client");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join(LEGACY_VERSION_FILE), "v2\n").unwrap();
+        std::fs::write(root.join(LEGACY_DATA_REVISION_FILE), "rev2\n").unwrap();
+        std::fs::write(root.join(LEGACY_FULL_REINSTALL_FILE), "v2\n").unwrap();
+        let state = read_client_state(&root);
+        assert_eq!(state.manifest_version, "v2");
+        assert_eq!(state.data_revision, "rev2");
+        assert!(root.join(CLIENT_STATE_FILE).is_file());
+        for legacy in [LEGACY_VERSION_FILE, LEGACY_DATA_REVISION_FILE, LEGACY_FULL_REINSTALL_FILE] {
+            assert!(!root.join(legacy).exists());
+        }
+        // Повторное чтение берёт версию из нового файла, а не из старых.
+        std::fs::write(root.join(LEGACY_VERSION_FILE), "stale\n").unwrap();
+        assert_eq!(read_client_state(&root).manifest_version, "v2");
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn state_update_keeps_known_revision_when_manifest_omits_it() {
+        let path = temp_file(b"state-revision");
+        let root = path.with_extension("client");
+        std::fs::create_dir(&root).unwrap();
+        write_client_state(&root, &ClientState { manifest_version: "v1".into(), data_revision: "r1".into() }).unwrap();
+        let manifest: ClientManifest = serde_json::from_str(r#"{"version":"v2","files":[]}"#).unwrap();
+        record_client_state(&root, &manifest).unwrap();
+        let state = read_client_state(&root);
+        assert_eq!(state.manifest_version, "v2");
+        assert_eq!(state.data_revision, "r1");
         std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_file(path).unwrap();
     }
@@ -1709,14 +1785,13 @@ mod tests {
         std::fs::create_dir(&root).unwrap();
         let mut manifest: ClientManifest = serde_json::from_str(r#"{"version":"new","build":"1.60.1.70888","data_revision":"70888-fixed","files":[]}"#).unwrap();
         assert!(needs_data_bundle(&root, &manifest));
-        std::fs::write(root.join(".forever_data_revision"), "old\n").unwrap();
+        write_client_state(&root, &ClientState { manifest_version: "new".into(), data_revision: "old".into() }).unwrap();
         assert!(needs_data_bundle(&root, &manifest));
-        std::fs::write(root.join(".forever_data_revision"), "70888-fixed\n").unwrap();
+        write_client_state(&root, &ClientState { manifest_version: "new".into(), data_revision: "70888-fixed".into() }).unwrap();
         assert!(!needs_data_bundle(&root, &manifest));
         manifest.data_revision.clear();
         assert!(!needs_data_bundle(&root, &manifest));
-        std::fs::remove_file(root.join(".forever_data_revision")).unwrap();
-        std::fs::remove_dir(root).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_file(path).unwrap();
     }
 
@@ -1725,7 +1800,7 @@ mod tests {
         let path = temp_file(b"marker");
         let root = path.with_extension("client");
         std::fs::create_dir_all(root.join("Data/data")).unwrap();
-        std::fs::write(root.join(".forever_data_revision"), "fixed\n").unwrap();
+        write_client_state(&root, &ClientState { manifest_version: "v".into(), data_revision: "fixed".into() }).unwrap();
         let mut manifest: ClientManifest = serde_json::from_str(r#"{"version":"v","data_revision":"fixed","files":[]}"#).unwrap();
         manifest.files.push(manifest_file("Data/data/000000000e.idx", 99, "old"));
         manifest.files.push(manifest_file("Data/wowf/000000000e.idx", 99, "old"));
